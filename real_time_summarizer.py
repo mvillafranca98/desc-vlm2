@@ -1,0 +1,627 @@
+#!/usr/bin/env python3
+"""
+Real-Time Video Summarization System with VLM, LLM, and Langfuse Integration
+"""
+
+import os
+import cv2
+import time
+import asyncio
+import logging
+import threading
+import signal
+import sys
+from pathlib import Path
+from typing import Optional, Dict, Any
+from collections import deque
+import numpy as np
+
+# Set environment variables before importing other modules
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
+
+# Set OpenCV to use single thread to avoid segfaults on macOS
+cv2.setNumThreads(1)
+
+from vlm_client_module import VLMClientWrapper
+from llm_summarizer import LLMSummarizer
+from face_recognition_module import FaceRecognizer
+from langfuse_tracker import LangfuseTracker
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Set specific loggers to reduce noise
+logging.getLogger('openai').setLevel(logging.WARNING)
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
+
+
+class VideoSummarizer:
+    """Main video summarization system."""
+    
+    def __init__(
+        self,
+        camera_index: int = 0,
+        fps: int = 4,
+        vlm_url: str = "http://38.80.152.249:30447/v1",
+        vlm_model: str = "qwen3",
+        reference_faces_dir: str = "reference_faces",
+        caption_interval: float = 5.0  # Generate caption every 5 seconds
+    ):
+        self.camera_index = camera_index
+        self.fps = fps
+        self.frame_interval = 1.0 / fps  # For display update rate
+        self.caption_interval = caption_interval  # For VLM processing (every 5 seconds)
+        self.running = False
+        self.cap = None
+        
+        # Initialize components
+        logger.info("Initializing Video Summarizer components...")
+        self.vlm_client = VLMClientWrapper(vlm_url, vlm_model)
+        self.llm_summarizer = LLMSummarizer()
+        self.face_recognizer = FaceRecognizer(reference_faces_dir)
+        self.langfuse_tracker = LangfuseTracker()
+        
+        # State management
+        self.latest_caption = "Waiting for first frame..."
+        self.current_summary = "No summary yet. Gathering captions..."
+        self.caption_queue = deque(maxlen=100)
+        self.last_summary_time = 0
+        self.last_caption_time = 0  # Track when last caption was generated
+        self.summary_interval = 60  # Update summary every 60 seconds (1 minute)
+        
+        # UI window
+        self.window_name = "Video Summarization System"
+        self.display_width = 800
+        self.display_height = 600
+        
+        # Statistics
+        self.frames_captured = 0
+        self.frames_processed = 0
+        
+    def initialize_camera(self) -> bool:
+        """Initialize camera capture."""
+        try:
+            logger.info(f"Opening camera {self.camera_index}...")
+            self.cap = cv2.VideoCapture(self.camera_index)
+            
+            if not self.cap.isOpened():
+                logger.error(f"Failed to open camera {self.camera_index}")
+                return False
+                
+            # Set camera properties for better performance
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            self.cap.set(cv2.CAP_PROP_FPS, 30)
+            
+            logger.info("Camera initialized successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error initializing camera: {e}")
+            return False
+    
+    def process_frame(self, frame: np.ndarray) -> Dict[str, Any]:
+        """Process a single frame through the pipeline."""
+        with self.langfuse_tracker.create_trace("frame_processing") as trace:
+            try:
+                # Face recognition (skip if face recognizer not available to avoid segfaults)
+                recognized_faces = []
+                try:
+                    with self.langfuse_tracker.create_span(trace.id, "face_recognition"):
+                        if self.face_recognizer.enabled:
+                            recognized_faces = self.face_recognizer.recognize_faces(frame)
+                except Exception as face_error:
+                    logger.warning(f"Face recognition error (continuing without): {face_error}")
+                
+                # VLM captioning
+                with self.langfuse_tracker.create_span(trace.id, "vlm_caption"):
+                    # Build prompt with face information
+                    prompt = "Describe what you see in this image in one concise sentence."
+                    if recognized_faces:
+                        names = [face['name'] for face in recognized_faces]
+                        prompt += f" People visible: {', '.join(names)}."
+                    
+                    # CRITICAL FIX: Start generation BEFORE API call to ensure correct start_time
+                    # This fixes negative TTFT values in the dashboard
+                    generation_context = self.langfuse_tracker.start_generation(
+                        trace_id=trace.id,
+                        name="vlm_caption",
+                        model=self.vlm_client.model,
+                        input=prompt,
+                        metadata={
+                            'faces_detected': len(recognized_faces)
+                        }
+                    )
+                    
+                    # Enter the generation context BEFORE the API call
+                    # This sets the generation's start_time correctly
+                    generation_context.__enter__()
+                    
+                    try:
+                        # Make API call (this is where start_time is captured)
+                        caption_result = self.vlm_client.generate_caption(frame, prompt)
+                        
+                        if caption_result['success']:
+                            caption = caption_result['caption']
+                            # Update caption immediately (thread-safe)
+                            self.latest_caption = caption
+                            self.caption_queue.append(caption)
+                            
+                            # Log to console
+                            logger.info(f"Caption: {caption}")
+                            
+                            # Update generation with output and timing
+                            from datetime import datetime
+                            update_params = {
+                                "output": caption[:1000],
+                                "metadata": {
+                                    'faces_detected': len(recognized_faces),
+                                    'api_time': caption_result.get('api_time', 0)
+                                }
+                            }
+                            
+                            # Set completion_start_time for TTFT calculation
+                            if caption_result.get('completion_start_time'):
+                                update_params["completion_start_time"] = datetime.fromtimestamp(
+                                    caption_result.get('completion_start_time')
+                                )
+                            
+                            self.langfuse_tracker.client.update_current_generation(**update_params)
+                            
+                            # Log scores for VLM caption generation
+                            # Success score (1.0 = success, 0.0 = failure)
+                            self.langfuse_tracker.log_score(
+                                trace_id=trace.id,
+                                name="vlm_success",
+                                value=1.0,
+                                data_type="NUMERIC",
+                                comment="VLM caption generation succeeded",
+                                score_trace=False
+                            )
+                            
+                            # Latency score (normalized: lower is better, 0-1 scale)
+                            api_time_ms = caption_result.get('api_time', 0)
+                            # Normalize: assume 5000ms is worst, 0ms is best
+                            latency_score = max(0.0, min(1.0, 1.0 - (api_time_ms / 5000.0)))
+                            self.langfuse_tracker.log_score(
+                                trace_id=trace.id,
+                                name="vlm_latency_score",
+                                value=latency_score,
+                                data_type="NUMERIC",
+                                comment=f"VLM latency: {api_time_ms:.1f}ms",
+                                score_trace=False
+                            )
+                            
+                            # Caption quality score (based on length - reasonable length = good)
+                            caption_length = len(caption)
+                            quality_score = min(1.0, caption_length / 100.0)  # 100 chars = perfect
+                            self.langfuse_tracker.log_score(
+                                trace_id=trace.id,
+                                name="vlm_quality",
+                                value=quality_score,
+                                data_type="NUMERIC",
+                                comment=f"Caption quality based on length: {caption_length} chars",
+                                score_trace=False
+                            )
+                        else:
+                            # Update with error
+                            self.langfuse_tracker.client.update_current_generation(
+                                output="",
+                                metadata={
+                                    'error': caption_result.get('error', 'Unknown error'),
+                                    'faces_detected': len(recognized_faces)
+                                }
+                            )
+                            
+                            # Log failure score
+                            self.langfuse_tracker.log_score(
+                                trace_id=trace.id,
+                                name="vlm_success",
+                                value=0.0,
+                                data_type="NUMERIC",
+                                comment=f"VLM caption generation failed: {caption_result.get('error', 'Unknown error')}",
+                                score_trace=False
+                            )
+                    finally:
+                        # Exit the generation context
+                        generation_context.__exit__(None, None, None)
+                
+                # LLM summarization - only update every 60 seconds (1 minute)
+                current_time = time.time()
+                if current_time - self.last_summary_time >= self.summary_interval:
+                    logger.info(f"Updating summary with {len(self.caption_queue)} captions...")
+                    
+                    with self.langfuse_tracker.create_span(trace.id, "llm_summarization"):
+                        # Build input for logging
+                        recent_captions = list(self.caption_queue)[-10:] if len(self.caption_queue) > 10 else list(self.caption_queue)
+                        input_text = str(recent_captions)
+                        
+                        # CRITICAL FIX: Start generation BEFORE LLM call to ensure correct start_time
+                        # This fixes missing TTFT data for Mistral-7B in the dashboard
+                        generation_context = self.langfuse_tracker.start_generation(
+                            trace_id=trace.id,
+                            name="llm_summary",
+                            model=self.llm_summarizer.model_name,
+                            input=input_text,
+                            metadata={
+                                'captions_count': len(self.caption_queue)
+                            }
+                        )
+                        
+                        # Enter the generation context BEFORE the LLM call
+                        generation_context.__enter__()
+                        
+                        try:
+                            # Make LLM call (this is where start_time is captured)
+                            summary_result = self.llm_summarizer.update_summary(
+                                list(self.caption_queue)
+                            )
+                            
+                            if summary_result['success']:
+                                self.current_summary = summary_result['summary']
+                                self.last_summary_time = current_time
+                                logger.info(f"Summary updated: {self.current_summary[:100]}...")
+                                
+                                # Update generation with output and timing
+                                from datetime import datetime
+                                update_params = {
+                                    "output": summary_result['summary'][:1000],
+                                    "metadata": {
+                                        'captions_count': len(self.caption_queue),
+                                        'processing_time': summary_result.get('processing_time', 0)
+                                    }
+                                }
+                                
+                                # Set completion_start_time for TTFT calculation
+                                if summary_result.get('completion_start_time'):
+                                    update_params["completion_start_time"] = datetime.fromtimestamp(
+                                        summary_result.get('completion_start_time')
+                                    )
+                                
+                                self.langfuse_tracker.client.update_current_generation(**update_params)
+                                
+                                # Log scores for LLM summarization
+                                # Success score
+                                self.langfuse_tracker.log_score(
+                                    trace_id=trace.id,
+                                    name="llm_success",
+                                    value=1.0,
+                                    data_type="NUMERIC",
+                                    comment="LLM summary generation succeeded",
+                                    score_trace=False
+                                )
+                                
+                                # Processing time score (normalized)
+                                processing_time_ms = summary_result.get('processing_time', 0)
+                                # Normalize: assume 5000ms is worst, 0ms is best
+                                processing_score = max(0.0, min(1.0, 1.0 - (processing_time_ms / 5000.0)))
+                                self.langfuse_tracker.log_score(
+                                    trace_id=trace.id,
+                                    name="llm_processing_score",
+                                    value=processing_score,
+                                    data_type="NUMERIC",
+                                    comment=f"LLM processing time: {processing_time_ms:.1f}ms",
+                                    score_trace=False
+                                )
+                                
+                                # Summary quality score (based on length and captions processed)
+                                summary_length = len(summary_result['summary'])
+                                captions_count = len(self.caption_queue)
+                                quality_score = min(1.0, (summary_length / 200.0) * (captions_count / 10.0))
+                                self.langfuse_tracker.log_score(
+                                    trace_id=trace.id,
+                                    name="llm_quality",
+                                    value=quality_score,
+                                    data_type="NUMERIC",
+                                    comment=f"Summary quality: {summary_length} chars, {captions_count} captions",
+                                    score_trace=False
+                                )
+                                
+                                # Overall trace score (average of all metrics)
+                                overall_score = (1.0 + processing_score + quality_score) / 3.0
+                                self.langfuse_tracker.log_score(
+                                    trace_id=trace.id,
+                                    name="overall_quality",
+                                    value=overall_score,
+                                    data_type="NUMERIC",
+                                    comment="Overall trace quality score",
+                                    score_trace=True  # Score the entire trace
+                                )
+                            else:
+                                # Update with error
+                                self.langfuse_tracker.client.update_current_generation(
+                                    output="",
+                                    metadata={
+                                        'error': summary_result.get('error', 'Unknown error'),
+                                        'captions_count': len(self.caption_queue)
+                                    }
+                                )
+                                
+                                # Log failure score
+                                self.langfuse_tracker.log_score(
+                                    trace_id=trace.id,
+                                    name="llm_success",
+                                    value=0.0,
+                                    data_type="NUMERIC",
+                                    comment=f"LLM summary generation failed: {summary_result.get('error', 'Unknown error')}",
+                                    score_trace=False
+                                )
+                        finally:
+                            # Exit the generation context
+                            generation_context.__exit__(None, None, None)
+                
+                self.frames_processed += 1
+                
+                return {
+                    'success': True,
+                    'caption': self.latest_caption,
+                    'summary': self.current_summary,
+                    'faces': recognized_faces
+                }
+                
+            except Exception as e:
+                logger.error(f"Error processing frame: {e}", exc_info=True)
+                return {'success': False, 'error': str(e)}
+    
+    def create_display_frame(self, camera_frame: Optional[np.ndarray] = None) -> np.ndarray:
+        """Create the display frame with captions and summary."""
+        # Create black canvas
+        display = np.zeros((self.display_height, self.display_width, 3), dtype=np.uint8)
+        
+        # Add camera feed if available (top portion)
+        if camera_frame is not None:
+            # Resize camera frame to fit top half
+            cam_height = self.display_height // 2
+            cam_width = self.display_width
+            resized_cam = cv2.resize(camera_frame, (cam_width, cam_height))
+            display[0:cam_height, :] = resized_cam
+        
+        # Add caption section
+        caption_y = self.display_height // 2 + 50
+        cv2.putText(
+            display,
+            "Latest Caption:",
+            (10, caption_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 255),
+            2
+        )
+        
+        # Wrap caption text
+        caption_lines = self._wrap_text(self.latest_caption, 70)
+        for i, line in enumerate(caption_lines[:3]):  # Max 3 lines
+            cv2.putText(
+                display,
+                line,
+                (10, caption_y + 30 + i * 25),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                1
+            )
+        
+        # Add summary section
+        summary_y = caption_y + 120
+        cv2.putText(
+            display,
+            "Current Summary:",
+            (10, summary_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 0),
+            2
+        )
+        
+        # Wrap summary text
+        summary_lines = self._wrap_text(self.current_summary, 70)
+        for i, line in enumerate(summary_lines[:4]):  # Max 4 lines
+            cv2.putText(
+                display,
+                line,
+                (10, summary_y + 30 + i * 25),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (200, 200, 200),
+                1
+            )
+        
+        # Add statistics
+        stats_y = self.display_height - 30
+        stats_text = f"Frames: {self.frames_captured} | Processed: {self.frames_processed}"
+        cv2.putText(
+            display,
+            stats_text,
+            (10, stats_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (150, 150, 150),
+            1
+        )
+        
+        return display
+    
+    def _wrap_text(self, text: str, max_chars: int) -> list:
+        """Wrap text to fit within specified character width."""
+        words = text.split()
+        lines = []
+        current_line = []
+        current_length = 0
+        
+        for word in words:
+            if current_length + len(word) + 1 <= max_chars:
+                current_line.append(word)
+                current_length += len(word) + 1
+            else:
+                if current_line:
+                    lines.append(' '.join(current_line))
+                current_line = [word]
+                current_length = len(word) + 1
+        
+        if current_line:
+            lines.append(' '.join(current_line))
+        
+        return lines
+    
+    async def capture_loop(self):
+        """Async loop for capturing frames at specified FPS."""
+        last_capture_time = 0
+        last_process_time = 0
+        
+        while self.running:
+            current_time = time.time()
+            
+            # Always update display and check for keys
+            if self.cap and self.cap.isOpened():
+                ret, frame = self.cap.read()
+                
+                if ret:
+                    # Generate caption every 5 seconds (real-time processing)
+                    if current_time - self.last_caption_time >= self.caption_interval:
+                        self.frames_captured += 1
+                        self.last_caption_time = current_time
+                        logger.info(f"Scheduling frame {self.frames_captured} for caption generation (every {self.caption_interval}s)")
+                        # Process frame in background (non-blocking)
+                        task = asyncio.create_task(self.async_process_frame(frame.copy()))
+                        # Don't await - let it run in background
+                    
+                    # Update display every frame (with latest caption/summary)
+                    display_frame = self.create_display_frame(frame)
+                    cv2.imshow(self.window_name, display_frame)
+                    
+                    # Check for exit key
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == 27 or key == ord('q'):  # ESC or 'q'
+                        logger.info("Exit key pressed")
+                        self.running = False
+                        break
+                    
+                    # Small delay to allow async tasks to execute
+                    await asyncio.sleep(0.001)
+                else:
+                    logger.warning("Failed to read frame from camera")
+                    await asyncio.sleep(0.1)
+            else:
+                await asyncio.sleep(0.1)
+    
+    async def async_process_frame(self, frame: np.ndarray):
+        """Process frame asynchronously to avoid blocking."""
+        try:
+            logger.info("Starting async frame processing")
+            # Use thread pool to avoid blocking the event loop
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                self.process_frame,
+                frame
+            )
+            if result.get('success'):
+                logger.info(f"Frame processed successfully: caption='{result.get('caption', '')[:50]}...'")
+            else:
+                logger.warning(f"Frame processing failed: {result.get('error', 'Unknown error')}")
+        except Exception as e:
+            logger.error(f"Error in async frame processing: {e}", exc_info=True)
+    
+    def display_loop(self):
+        """Update display in separate thread."""
+        while self.running:
+            try:
+                display_frame = self.create_display_frame()
+                cv2.imshow(self.window_name, display_frame)
+                
+                key = cv2.waitKey(30) & 0xFF
+                if key == 27 or key == ord('q'):
+                    self.running = False
+                    break
+                    
+            except Exception as e:
+                logger.error(f"Error in display loop: {e}")
+                break
+            
+            time.sleep(0.03)
+    
+    async def run(self):
+        """Main run loop."""
+        logger.info("Starting Video Summarization System...")
+        
+        if not self.initialize_camera():
+            logger.error("Failed to initialize camera")
+            return
+        
+        self.running = True
+        
+        # Create display window
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(self.window_name, self.display_width, self.display_height)
+        
+        try:
+            # Run capture loop
+            await self.capture_loop()
+            
+        except KeyboardInterrupt:
+            logger.info("Received keyboard interrupt")
+        except Exception as e:
+            logger.error(f"Error in main loop: {e}", exc_info=True)
+        finally:
+            self.shutdown()
+    
+    def shutdown(self):
+        """Clean shutdown of all components."""
+        logger.info("Shutting down Video Summarization System...")
+        
+        self.running = False
+        
+        # Print statistics
+        self.vlm_client.print_statistics()
+        self.llm_summarizer.print_statistics()
+        
+        # Flush Langfuse
+        self.langfuse_tracker.flush()
+        
+        # Release resources
+        if self.cap:
+            self.cap.release()
+        cv2.destroyAllWindows()
+        
+        logger.info("Shutdown complete")
+
+
+def signal_handler(sig, frame):
+    """Handle CTRL+C gracefully."""
+    logger.info("Received interrupt signal, shutting down...")
+    sys.exit(0)
+
+
+async def main():
+    """Main entry point."""
+    # Setup signal handler
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    # Parse command line arguments for camera selection
+    import argparse
+    parser = argparse.ArgumentParser(description='Real-Time Video Summarization System')
+    parser.add_argument('--camera', type=int, default=0, help='Camera device index (default: 0)')
+    parser.add_argument('--fps', type=int, default=4, help='Frames per second to process (default: 4)')
+    args = parser.parse_args()
+    
+    # Create and run summarizer
+    summarizer = VideoSummarizer(
+        camera_index=args.camera,
+        fps=args.fps
+    )
+    
+    await summarizer.run()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
