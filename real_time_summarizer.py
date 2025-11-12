@@ -76,7 +76,7 @@ class VideoSummarizer:
         self.face_recognizer = FaceRecognizer(reference_faces_dir)
         self.langfuse_tracker = LangfuseTracker()
         self.scene_indexer = SceneIndexer(
-            table_name=os.getenv("SCENE_INDEX_TABLE", "scene_index"),
+            table_name=os.getenv("SCENE_INDEX_TABLE", "scene_embeddings"),
             embedding_model=os.getenv("SCENE_INDEX_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
             frames_dir=os.getenv("SCENE_INDEX_FRAMES_DIR", "frames"),
             enable_chunking=os.getenv("SCENE_INDEX_ENABLE_CHUNKING", "true").lower() == "true",
@@ -324,6 +324,11 @@ class VideoSummarizer:
                                 self.langfuse_tracker.client.update_current_generation(**update_params)
                                 
                                 # Index scene in LanceDB for semantic search
+                                if not self.scene_indexer.enabled:
+                                    logger.debug("Scene indexing skipped: indexer not enabled")
+                                elif len(self.scene_frames) == 0:
+                                    logger.warning(f"Scene indexing skipped: no frames captured (scene_indexer.enabled={self.scene_indexer.enabled}, scene_frames={len(self.scene_frames)})")
+                                
                                 if self.scene_indexer.enabled and len(self.scene_frames) > 0:
                                     try:
                                         # Generate unique scene ID

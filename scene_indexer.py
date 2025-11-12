@@ -575,8 +575,7 @@ class SceneIndexer:
             if level_filter:
                 # LanceDB currently doesn't filter via search; filter after retrieval
                 pass
-            results_arrow = search.limit(limit).to_arrow()
-            results = results_arrow.to_pylist()
+            results = search.limit(limit).to_list()
             
             # Convert results to list of dictionaries
             matches = []
@@ -653,13 +652,12 @@ class SceneIndexer:
                 )
                 self.embedding_dim = int(len(probe_embedding))
             zero_vector = np.zeros(self.embedding_dim, dtype=np.float32).tolist()
-            arrow_table = (
+            records = (
                 self.table
                 .search(zero_vector, vector_column_name="vector")
                 .limit(sample_limit)
-                .to_arrow()
+                .to_list()
             )
-            records = arrow_table.to_pylist()
             scenes = []
             for row in records:
                 frame_paths_value = row.get("frame_paths", [])

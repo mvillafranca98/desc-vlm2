@@ -7,6 +7,7 @@ Allows natural language search over indexed video scenes using LanceDB.
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -28,8 +29,10 @@ def search_scenes(query: str, limit: int = 5, min_score: float = 0.0, level: Opt
         limit: Maximum number of results to return
         min_score: Minimum similarity score (0.0 to 1.0)
     """
-    # Initialize scene indexer
-    indexer = SceneIndexer()
+    # Initialize scene indexer (use same table name as real_time_summarizer.py)
+    indexer = SceneIndexer(
+        table_name=os.getenv("SCENE_INDEX_TABLE", "scene_embeddings")
+    )
     
     if not indexer.enabled:
         logger.error("Scene indexer is not enabled. Please check LanceDB configuration.")
@@ -90,7 +93,10 @@ def list_all_scenes(limit: Optional[int] = None):
     Args:
         limit: Optional limit on number of scenes to display
     """
-    indexer = SceneIndexer()
+    # Initialize scene indexer (use same table name as real_time_summarizer.py)
+    indexer = SceneIndexer(
+        table_name=os.getenv("SCENE_INDEX_TABLE", "scene_embeddings")
+    )
     
     if not indexer.enabled:
         logger.error("Scene indexer is not enabled.")
