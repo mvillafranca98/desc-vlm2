@@ -9,6 +9,7 @@ A comprehensive Python application that captures video from a camera, processes 
 - **LLM-based summarization** using Mistral-7B-Instruct-v0.3
 - **Face recognition** with reference images
 - **Langfuse integration** for comprehensive telemetry tracking
+- **LanceDB semantic search** for scene retrieval by natural language queries
 - **Live UI display** showing captions, summaries, and video feed
 - **Detailed statistics** on shutdown
 
@@ -19,7 +20,9 @@ real_time_summarizer.py      # Main application with async video processing
 ├── vlm_client_module.py      # VLM API client with statistics
 ├── llm_summarizer.py         # LLM-based caption synthesizer
 ├── face_recognition_module.py # Face recognition with reference images
-└── langfuse_tracker.py       # Langfuse telemetry integration
+├── langfuse_tracker.py       # Langfuse telemetry integration
+├── scene_indexer.py          # LanceDB semantic search integration
+└── search_scenes.py          # CLI tool for scene search
 ```
 
 ## Installation
@@ -58,6 +61,8 @@ pip install dlib
 
 ### 3. Environment Setup
 
+**Langfuse (Telemetry Tracking):**
+
 **Easy way** - Use the provided setup script:
 ```bash
 source setup_langfuse.sh
@@ -70,7 +75,21 @@ export LANGFUSE_PUBLIC_KEY="pk-lf-61ba616e-de46-4d72-a848-753fd9a5b3fb"
 export LANGFUSE_SECRET_KEY="sk-lf-e8c7bb1b-554d-4396-95ad-95c30593d6c8"
 ```
 
-**Note**: These are the provided credentials for this project. For production use, get your own from https://cloud.langfuse.com
+**LanceDB (Semantic Search) - Optional:**
+
+**For LanceDB Cloud:**
+```bash
+export LANCEDB_PROJECT_SLUG="your-project-slug"
+export LANCEDB_API_KEY="your-api-key"
+export LANCEDB_REGION="us-east-1"  # Optional
+```
+
+**For Local Development:**
+No setup needed! The system will automatically use a local database at `data/scenes/` if Cloud credentials are not set.
+
+See `LANCEDB_INTEGRATION.md` for detailed setup instructions.
+
+**Note**: Langfuse credentials are provided for this project. For production use, get your own from https://cloud.langfuse.com and https://cloud.lancedb.com
 
 ### 4. Reference Faces (Optional)
 
@@ -216,6 +235,26 @@ View comprehensive metrics at https://cloud.langfuse.com:
 - `overall_quality` - Overall trace quality score
 
 All scores are automatically logged and visible on the Langfuse home page dashboard. See `LANGFUSE_INTEGRATION.md` for detailed integration guide.
+
+### LanceDB Semantic Search
+
+Search indexed video scenes using natural language queries:
+
+```bash
+# Search for scenes
+python search_scenes.py "a man wearing a hat"
+
+# List all indexed scenes
+python search_scenes.py --list
+```
+
+**Features:**
+- Automatic scene indexing after each summary generation
+- Vector embeddings for semantic similarity search
+- Frame storage with scene association
+- Natural language query interface
+
+See `LANCEDB_INTEGRATION.md` for complete integration guide.
 
 ## Troubleshooting
 
@@ -401,6 +440,20 @@ All operations are tracked with:
 - Automatic data synchronization
 
 See `LANGFUSE_INTEGRATION.md` for complete integration details.
+
+### LanceDB Semantic Search
+
+Scenes are automatically indexed with:
+- **Embeddings**: Vector representations of summaries using sentence-transformers
+- **Frame Storage**: Associated frames saved to disk
+- **Metadata**: Timestamps, scene IDs, and frame paths
+
+**Search Capabilities:**
+- Natural language queries (e.g., "a man wearing a hat")
+- Similarity-based retrieval
+- Frame path association for viewing actual frames
+
+See `LANCEDB_INTEGRATION.md` for complete integration details.
 
 ### Caption Synthesis
 

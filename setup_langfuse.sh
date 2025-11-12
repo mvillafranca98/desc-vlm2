@@ -7,8 +7,8 @@
 echo "Setting up Langfuse environment variables..."
 
 export LANGFUSE_HOST="https://cloud.langfuse.com"
-export LANGFUSE_PUBLIC_KEY="pk-lf-61ba616e-de46-4d72-a848-753fd9a5b3fb"
-export LANGFUSE_SECRET_KEY="sk-lf-e8c7bb1b-554d-4396-95ad-95c30593d6c8"
+export LANGFUSE_PUBLIC_KEY="pk-lf-9d51189b-1ff3-4a6c-a899-335651915d99"
+export LANGFUSE_SECRET_KEY="sk-lf-b9e367e9-8fd6-44ca-811f-13e7efe87a6e"
 
 echo "✓ Langfuse environment variables set!"
 echo ""

@@ -63,3 +63,8 @@ output/
 recordings/
 screenshots/
 
+# LanceDB and scene indexing
+frames/
+data/
+*.lancedb
+

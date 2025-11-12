@@ -18,6 +18,12 @@ dlib>=19.24.0
 # Langfuse tracking
 langfuse>=2.0.0
 
+# LanceDB for semantic search
+lancedb>=0.4.0
+sentence-transformers>=2.2.0
+pandas>=2.0.0
+pyarrow>=12.0.0
+
 # Async support
 aiohttp>=3.9.0
 

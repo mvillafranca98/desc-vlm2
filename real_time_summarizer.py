@@ -23,6 +23,11 @@ os.environ['MKL_NUM_THREADS'] = '1'
 os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
 os.environ['NUMEXPR_NUM_THREADS'] = '1'
 
+# Provide default LanceDB Cloud credentials if not already set
+os.environ.setdefault('LANCEDB_PROJECT_SLUG', 'descvlm2-lnh0lv')
+os.environ.setdefault('LANCEDB_API_KEY', 'sk_SJLWUL2G2JDQFLZ5WKKM5DC4KJKIVAV73IECRDHTRSBUAEMY2DSQ====')
+os.environ.setdefault('LANCEDB_REGION', 'us-east-1')
+
 # Set OpenCV to use single thread to avoid segfaults on macOS
 cv2.setNumThreads(1)
 
@@ -30,6 +35,7 @@ from vlm_client_module import VLMClientWrapper
 from llm_summarizer import LLMSummarizer
 from face_recognition_module import FaceRecognizer
 from langfuse_tracker import LangfuseTracker
+from scene_indexer import SceneIndexer
 
 # Configure logging
 logging.basicConfig(
@@ -69,6 +75,14 @@ class VideoSummarizer:
         self.llm_summarizer = LLMSummarizer()
         self.face_recognizer = FaceRecognizer(reference_faces_dir)
         self.langfuse_tracker = LangfuseTracker()
+        self.scene_indexer = SceneIndexer(
+            table_name=os.getenv("SCENE_INDEX_TABLE", "scene_index"),
+            embedding_model=os.getenv("SCENE_INDEX_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
+            frames_dir=os.getenv("SCENE_INDEX_FRAMES_DIR", "frames"),
+            enable_chunking=os.getenv("SCENE_INDEX_ENABLE_CHUNKING", "true").lower() == "true",
+            chunk_duration=float(os.getenv("SCENE_INDEX_CHUNK_SECONDS", "10")),
+            enable_caption_embeddings=os.getenv("SCENE_INDEX_ENABLE_CAPTION", "true").lower() == "true"
+        )
         
         # State management
         self.latest_caption = "Waiting for first frame..."
@@ -77,6 +91,12 @@ class VideoSummarizer:
         self.last_summary_time = 0
         self.last_caption_time = 0  # Track when last caption was generated
         self.summary_interval = 60  # Update summary every 60 seconds (1 minute)
+        
+        # Frame storage for scene indexing
+        self.scene_frames = []  # Store frames for current scene
+        self.scene_start_time = None  # When current scene started
+        self.caption_records = []  # Store captions metadata for current scene
+        self.scene_face_names = set()
         
         # UI window
         self.window_name = "Video Summarization System"
@@ -127,8 +147,10 @@ class VideoSummarizer:
                     # Build prompt with face information
                     prompt = "Describe what you see in this image in one concise sentence."
                     if recognized_faces:
-                        names = [face['name'] for face in recognized_faces]
-                        prompt += f" People visible: {', '.join(names)}."
+                        names = [face.get('name') for face in recognized_faces if face.get('name')]
+                        if names:
+                            self.scene_face_names.update(names)
+                            prompt += f" People visible: {', '.join(names)}."
                     
                     # CRITICAL FIX: Start generation BEFORE API call to ensure correct start_time
                     # This fixes negative TTFT values in the dashboard
@@ -155,6 +177,18 @@ class VideoSummarizer:
                             # Update caption immediately (thread-safe)
                             self.latest_caption = caption
                             self.caption_queue.append(caption)
+                            
+                            caption_timestamp = time.time()
+                            self.caption_records.append({
+                                'text': caption,
+                                'timestamp': caption_timestamp,
+                                'frame_index': len(self.scene_frames) - 1 if self.scene_frames else None,
+                                'frame_path': None,
+                                'metadata': {
+                                    'faces_detected': [face.get('name') for face in recognized_faces if face.get('name')],
+                                    'api_time_ms': caption_result.get('api_time', 0)
+                                }
+                            })
                             
                             # Log to console
                             logger.info(f"Caption: {caption}")
@@ -288,6 +322,176 @@ class VideoSummarizer:
                                     )
                                 
                                 self.langfuse_tracker.client.update_current_generation(**update_params)
+                                
+                                # Index scene in LanceDB for semantic search
+                                if self.scene_indexer.enabled and len(self.scene_frames) > 0:
+                                    try:
+                                        # Generate unique scene ID
+                                        scene_id = f"scene_{int(current_time)}"
+                                        
+                                        # Save frames to disk and collect paths
+                                        frame_paths = []
+                                        frame_index_map = {}
+                                        for idx, frame_data in enumerate(self.scene_frames):
+                                            frame_path = self.scene_indexer.save_frame(
+                                                frame_data['frame'],
+                                                scene_id,
+                                                idx
+                                            )
+                                            if frame_path:
+                                                frame_paths.append(frame_path)
+                                                frame_index_map[idx] = frame_path
+                                        
+                                        caption_records_with_paths = []
+                                        for caption_record in self.caption_records:
+                                            record_copy = dict(caption_record)
+                                            frame_index = record_copy.get('frame_index')
+                                            if frame_index is not None:
+                                                record_copy['frame_path'] = frame_index_map.get(frame_index)
+                                            caption_records_with_paths.append(record_copy)
+                                        
+                                        scene_metadata = {
+                                            'caption_count': len(self.caption_records),
+                                            'summary_length': len(summary_result['summary']),
+                                            'recognized_faces': list(self.scene_face_names),
+                                            'chunking_enabled': self.scene_indexer.enable_chunking,
+                                            'caption_embeddings_enabled': self.scene_indexer.enable_caption_embeddings,
+                                            'session_id': self.scene_indexer.session_id
+                                        }
+                                        
+                                        # Index the scene with summary and frame paths
+                                        if frame_paths:
+                                            # Instrument LanceDB indexing with Langfuse
+                                            lancedb_generation = self.langfuse_tracker.start_generation(
+                                                trace_id=trace.id,
+                                                name="lancedb_index_scene",
+                                                model="lancedb_scene_indexer",
+                                                input=summary_result['summary'][:500],
+                                                metadata={
+                                                    'frame_count': len(frame_paths),
+                                                    'scene_id': scene_id,
+                                                    'caption_count': len(caption_records_with_paths),
+                                                    'recognized_faces': list(self.scene_face_names)
+                                                }
+                                            )
+                                            lancedb_generation.__enter__()
+                                            index_start = time.time()
+                                            indexed_id = None
+                                            try:
+                                                indexed_id = self.scene_indexer.index_scene(
+                                                    scene_id=scene_id,
+                                                    frame_paths=frame_paths,
+                                                    summary_text=summary_result['summary'],
+                                                    captions=caption_records_with_paths,
+                                                    scene_start_time=self.scene_start_time,
+                                                    scene_end_time=current_time,
+                                                    metadata=scene_metadata
+                                                )
+                                                index_end = time.time()
+                                                duration_ms = (index_end - index_start) * 1000.0
+                                                
+                                                if indexed_id:
+                                                    logger.info(f"Scene indexed: {indexed_id} with {len(frame_paths)} frames")
+                                                    
+                                                    from datetime import datetime
+                                                    self.langfuse_tracker.client.update_current_generation(
+                                                        output=f"Indexed scene {indexed_id}",
+                                                        completion_start_time=datetime.fromtimestamp(index_end),
+                                                        metadata={
+                                                            'frame_count': len(frame_paths),
+                                                            'duration_ms': duration_ms,
+                                                            'scene_id': scene_id,
+                                                            'caption_count': len(caption_records_with_paths),
+                                                            'recognized_faces': list(self.scene_face_names),
+                                                            'chunking_enabled': self.scene_indexer.enable_chunking,
+                                                            'caption_embeddings_enabled': self.scene_indexer.enable_caption_embeddings
+                                                        }
+                                                    )
+                                                    
+                                                    # Log LanceDB success score
+                                                    self.langfuse_tracker.log_score(
+                                                        trace_id=trace.id,
+                                                        name="lancedb_success",
+                                                        value=1.0,
+                                                        data_type="NUMERIC",
+                                                        comment=f"LanceDB scene indexing succeeded (scene_id={indexed_id})",
+                                                        score_trace=False
+                                                    )
+                                                    
+                                                    # Log LanceDB latency score (normalize 0-3s range)
+                                                    latency_score = max(0.0, min(1.0, 1.0 - (duration_ms / 3000.0)))
+                                                    self.langfuse_tracker.log_score(
+                                                        trace_id=trace.id,
+                                                        name="lancedb_latency_score",
+                                                        value=latency_score,
+                                                        data_type="NUMERIC",
+                                                        comment=f"LanceDB indexing latency: {duration_ms:.1f}ms",
+                                                        score_trace=False
+                                                    )
+                                                    
+                                                    # Log LanceDB frame coverage score
+                                                    coverage_score = min(1.0, len(frame_paths) / 10.0)
+                                                    self.langfuse_tracker.log_score(
+                                                        trace_id=trace.id,
+                                                        name="lancedb_frame_coverage",
+                                                        value=coverage_score,
+                                                        data_type="NUMERIC",
+                                                        comment=f"LanceDB frames indexed: {len(frame_paths)}",
+                                                        score_trace=False
+                                                    )
+                                                else:
+                                                    logger.warning("LanceDB index_scene returned None")
+                                                    self.langfuse_tracker.client.update_current_generation(
+                                                        output="",
+                                                        completion_start_time=datetime.fromtimestamp(index_start),
+                                                        metadata={
+                                                            'frame_count': len(frame_paths),
+                                                            'scene_id': scene_id,
+                                                            'caption_count': len(caption_records_with_paths),
+                                                            'error': 'index_scene returned None'
+                                                        }
+                                                    )
+                                                    self.langfuse_tracker.log_score(
+                                                        trace_id=trace.id,
+                                                        name="lancedb_success",
+                                                        value=0.0,
+                                                        data_type="NUMERIC",
+                                                        comment="LanceDB indexing failed (no scene_id returned)",
+                                                        score_trace=False
+                                                    )
+                                            except Exception as index_error:
+                                                index_end = time.time()
+                                                logger.warning(f"Error indexing scene (continuing): {index_error}", exc_info=False)
+                                                from datetime import datetime
+                                                self.langfuse_tracker.client.update_current_generation(
+                                                    output="",
+                                                    completion_start_time=datetime.fromtimestamp(index_end),
+                                                        metadata={
+                                                            'frame_count': len(frame_paths),
+                                                            'scene_id': scene_id,
+                                                            'caption_count': len(caption_records_with_paths),
+                                                            'error': str(index_error)
+                                                        }
+                                                )
+                                                self.langfuse_tracker.log_score(
+                                                    trace_id=trace.id,
+                                                    name="lancedb_success",
+                                                    value=0.0,
+                                                    data_type="NUMERIC",
+                                                    comment=f"LanceDB indexing error: {index_error}",
+                                                    score_trace=False
+                                                )
+                                            finally:
+                                                lancedb_generation.__exit__(None, None, None)
+                                        
+                                        # Reset scene frames for next scene
+                                        self.scene_frames = []
+                                        self.caption_records = []
+                                        self.scene_start_time = None  # Start new scene on next frame
+                                        self.scene_face_names.clear()
+                                        
+                                    except Exception as scene_error:
+                                        logger.warning(f"Error indexing scene (continuing): {scene_error}", exc_info=False)
                                 
                                 # Log scores for LLM summarization
                                 # Success score
@@ -485,6 +689,24 @@ class VideoSummarizer:
                 ret, frame = self.cap.read()
                 
                 if ret:
+                    # Store frame for scene indexing (keep last N frames for current scene)
+                    # Store a sample of frames (every 5 seconds) to avoid storing too many
+                    if current_time - self.last_caption_time >= self.caption_interval:
+                        # Initialize scene start time on first frame
+                        if self.scene_start_time is None:
+                            self.scene_start_time = current_time
+                        
+                        # Store frame copy for scene indexing
+                        self.scene_frames.append({
+                            'frame': frame.copy(),
+                            'timestamp': current_time,
+                            'frame_index': len(self.scene_frames)
+                        })
+                        
+                        # Limit stored frames to avoid memory issues (keep last 60 frames max)
+                        if len(self.scene_frames) > 60:
+                            self.scene_frames.pop(0)
+                    
                     # Generate caption every 5 seconds (real-time processing)
                     if current_time - self.last_caption_time >= self.caption_interval:
                         self.frames_captured += 1
