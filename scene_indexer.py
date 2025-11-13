@@ -544,7 +544,16 @@ class SceneIndexer:
         min_similarity: float = 0.0,
         level_filter: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
-        """Search for scenes or sub-scenes using embedding similarity.
+        """Search for scenes or sub-scenes using VECTOR EMBEDDING similarity.
+        
+        IMPORTANT: This is a VECTOR-BASED search, not a text-based search.
+        - The query text is converted to an embedding vector using the embedding model
+        - The search is performed against the 'embedding'/'vector' column in LanceDB
+        - Results are ranked by cosine similarity between query embedding and stored embeddings
+        - The 'summary_text' field is NOT used for searching, only for display and post-filtering
+        
+        This enables semantic search where queries like "male human performing art" can
+        match scenes with "a man playing piano" based on semantic similarity in vector space.
         
         Args:
             query_text: Natural language search query (e.g., "a man wearing a hat").
@@ -566,16 +575,30 @@ class SceneIndexer:
             pass
         
         try:
-            # Generate embedding for query
+            # IMPORTANT: This search is VECTOR-BASED, not text-based
+            # The query text is converted to an embedding vector, and we search against
+            # the 'embedding'/'vector' column in LanceDB, NOT the 'summary_text' column.
+            # This enables semantic search (e.g., "man playing piano" matches "male human performing art")
+            
+            # Generate embedding for query text
             query_embedding = self.generate_embedding(query_text)
             
-            # Perform similarity search
+            # Perform vector similarity search in LanceDB
             # LanceDB search expects the vector directly, not as list
+            # This searches through the embedding vectors, not the text_summary field
             search = self.table.search(query_embedding.tolist(), vector_column_name="vector")
             if level_filter:
                 # LanceDB currently doesn't filter via search; filter after retrieval
                 pass
             results = search.limit(limit).to_list()
+            
+            # Debug: Log structure of first result to understand what fields are available
+            if results and logger.isEnabledFor(logging.DEBUG):
+                first_result = results[0]
+                logger.debug(f"First result keys: {list(first_result.keys())}")
+                for key in ['_distance', 'distance', '_l2_distance', '_similarity', 'similarity']:
+                    if key in first_result:
+                        logger.debug(f"Found distance field '{key}': {first_result[key]}")
             
             # Convert results to list of dictionaries
             matches = []
@@ -599,8 +622,87 @@ class SceneIndexer:
                 else:
                     metadata = metadata_value or {}
                 
-                distance = row.get("_distance", 0.0)
-                similarity = 1.0 - min(1.0, distance)
+                # Try multiple possible field names for distance/similarity
+                # LanceDB may return distance in different fields depending on version/cloud
+                distance_or_similarity = (
+                    row.get("_distance") or 
+                    row.get("distance") or 
+                    row.get("_l2_distance") or
+                    row.get("_similarity") or
+                    row.get("similarity") or
+                    None
+                )
+                
+                # Debug: Log available fields for first result only
+                if len(matches) == 0 and distance_or_similarity is None:
+                    logger.debug(f"Distance field not found. Available keys in result: {list(row.keys())[:10]}")
+                
+                # Calculate similarity from distance
+                if distance_or_similarity is None:
+                    # Distance field not found - compute cosine similarity manually as fallback
+                    try:
+                        # Get embedding from result
+                        result_embedding = row.get("embedding") or row.get("vector")
+                        if result_embedding and query_embedding is not None:
+                            # Convert to numpy arrays
+                            result_vec = np.array(result_embedding, dtype=np.float32)
+                            query_vec = np.array(query_embedding, dtype=np.float32)
+                            
+                            # Compute cosine similarity: dot product / (norm1 * norm2)
+                            dot_product = np.dot(result_vec, query_vec)
+                            norm1 = np.linalg.norm(result_vec)
+                            norm2 = np.linalg.norm(query_vec)
+                            
+                            if norm1 > 0 and norm2 > 0:
+                                similarity = float(dot_product / (norm1 * norm2))
+                                # Cosine similarity ranges from -1 to 1, normalize to 0-1
+                                similarity = max(0.0, similarity)  # Cap at 0.0 minimum
+                            else:
+                                similarity = 0.0
+                        else:
+                            logger.warning("Cannot compute similarity: embedding not found in result")
+                            similarity = 0.0
+                    except Exception as e:
+                        logger.warning(f"Error computing cosine similarity: {e}, using 0.0")
+                        similarity = 0.0
+                else:
+                    # LanceDB with cosine metric returns cosine distance (0-2 range):
+                    # Cosine distance = 1 - cosine_similarity
+                    # So: cosine_similarity = 1 - cosine_distance
+                    # 
+                    # Range mapping:
+                    # distance = 0.0 → similarity = 1.0 (identical)
+                    # distance = 1.0 → similarity = 0.0 (orthogonal)
+                    # distance = 2.0 → similarity = -1.0 (opposite)
+                    #
+                    # For display, we normalize to 0-1 range (negative similarities become 0.0)
+                    distance = float(distance_or_similarity)
+                    
+                    # Convert cosine distance to cosine similarity
+                    # Cosine distance = 1 - cosine_similarity
+                    # So: cosine_similarity = 1 - cosine_distance
+                    cosine_similarity = 1.0 - distance
+                    
+                    # For display, we can show negative similarities as very small positive values
+                    # OR we can show the raw similarity (which can be negative)
+                    # Let's normalize: negative similarities become 0.0, but log the raw value
+                    similarity = max(0.0, cosine_similarity)
+                    
+                    # Store raw similarity in metadata for debugging/analysis
+                    # This allows us to see actual semantic similarity even when negative
+                    if cosine_similarity < 0.0:
+                        logger.debug(f"Cosine similarity is negative ({cosine_similarity:.3f}), capping at 0.0. Distance: {distance:.3f}")
+                        # Store raw similarity for potential use in flexible filtering
+                        if "metadata" in row:
+                            if isinstance(metadata, dict):
+                                metadata["raw_cosine_similarity"] = cosine_similarity
+                            elif isinstance(metadata, str):
+                                try:
+                                    metadata_dict = json.loads(metadata)
+                                    metadata_dict["raw_cosine_similarity"] = cosine_similarity
+                                    metadata = json.dumps(metadata_dict)
+                                except:
+                                    pass
                 
                 if similarity < min_similarity:
                     continue
@@ -610,6 +712,7 @@ class SceneIndexer:
                     "scene_id": row.get("scene_id"),
                     "level": level,
                     "similarity": similarity,
+                    "distance": distance_or_similarity if distance_or_similarity is not None else None,  # Include raw distance for flexible filtering
                     "frame_paths": frame_paths,
                     "summary_text": row.get("summary_text"),
                     "metadata": metadata,

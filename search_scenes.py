@@ -6,11 +6,13 @@ Allows natural language search over indexed video scenes using LanceDB.
 """
 
 import argparse
+import json
 import logging
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from scene_indexer import SceneIndexer
 
 # Configure logging
@@ -21,7 +23,158 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def search_scenes(query: str, limit: int = 5, min_score: float = 0.0, level: Optional[str] = None):
+def calculate_relevance_score(result: Dict[str, Any], query: str) -> Dict[str, Any]:
+    """Calculate a relevance score for a search result.
+    
+    Args:
+        result: Search result dictionary
+        query: Original search query
+        
+    Returns:
+        Dictionary with scoring breakdown and total score
+    """
+    query_lower = query.lower()
+    text = (result.get("summary_text") or "").lower()
+    
+    # Base similarity score from vector search (0.0 to 1.0)
+    vector_similarity = result.get("similarity", 0.0)
+    
+    # Keyword matching score
+    query_words = set(query_lower.split())
+    text_words = set(text.split())
+    if query_words:
+        keyword_overlap = len(query_words.intersection(text_words)) / len(query_words)
+    else:
+        keyword_overlap = 0.0
+    
+    # Exact phrase matching bonus
+    exact_match = 1.0 if query_lower in text else 0.0
+    
+    # Level-based weighting (caption-level is more specific)
+    level_weights = {
+        "caption": 1.2,
+        "chunk": 1.1,
+        "scene": 1.0
+    }
+    level = result.get("level", "scene")
+    level_weight = level_weights.get(level, 1.0)
+    
+    # Frame count bonus (more frames = more context)
+    frame_count = len(result.get("frame_paths", []))
+    frame_bonus = min(0.1, frame_count * 0.01)  # Max 0.1 bonus
+    
+    # Calculate weighted total score
+    base_score = vector_similarity * 0.5  # 50% weight on vector similarity
+    keyword_score = keyword_overlap * 0.3  # 30% weight on keyword matching
+    exact_score = exact_match * 0.2  # 20% weight on exact phrase match
+    
+    raw_score = (base_score + keyword_score + exact_score) * level_weight + frame_bonus
+    total_score = min(1.0, raw_score)  # Cap at 1.0
+    
+    return {
+        "total_score": total_score,
+        "vector_similarity": vector_similarity,
+        "keyword_overlap": keyword_overlap,
+        "exact_match": exact_match > 0,
+        "level_weight": level_weight,
+        "frame_bonus": frame_bonus,
+        "breakdown": {
+            "vector_component": base_score,
+            "keyword_component": keyword_score,
+            "exact_component": exact_score,
+            "level_adjusted": (base_score + keyword_score + exact_score) * level_weight,
+            "final_with_bonus": total_score
+        }
+    }
+
+
+def export_results(
+    results: List[Dict[str, Any]],
+    query: str,
+    output_format: str = "json",
+    output_file: Optional[str] = None
+) -> str:
+    """Export search results to a file.
+    
+    Args:
+        results: List of search result dictionaries
+        query: Original search query
+        output_format: Export format ('json' or 'csv')
+        output_file: Optional output file path
+        
+    Returns:
+        Path to the exported file
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    query_safe = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in query[:50])
+    
+    if output_file is None:
+        if output_format == "json":
+            output_file = f"search_results_{query_safe}_{timestamp}.json"
+        else:
+            output_file = f"search_results_{query_safe}_{timestamp}.csv"
+    
+    output_path = Path(output_file)
+    
+    # Add scores to results
+    scored_results = []
+    for result in results:
+        score_info = calculate_relevance_score(result, query)
+        scored_result = {
+            **result,
+            "relevance_score": score_info["total_score"],
+            "scoring_breakdown": score_info
+        }
+        scored_results.append(scored_result)
+    
+    if output_format == "json":
+        export_data = {
+            "query": query,
+            "timestamp": datetime.now().isoformat(),
+            "result_count": len(scored_results),
+            "results": scored_results
+        }
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(export_data, f, indent=2, ensure_ascii=False, default=str)
+    else:  # CSV
+        import csv
+        with open(output_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            # Header
+            writer.writerow([
+                "Rank", "Record ID", "Scene ID", "Level", "Similarity", "Relevance Score",
+                "Vector Sim", "Keyword Overlap", "Exact Match", "Frame Count",
+                "Timestamp", "Text Preview"
+            ])
+            # Data rows
+            for i, result in enumerate(scored_results, 1):
+                writer.writerow([
+                    i,
+                    result.get("id", ""),
+                    result.get("scene_id", ""),
+                    result.get("level", ""),
+                    f"{result.get('similarity', 0.0):.3f}",
+                    f"{result.get('relevance_score', 0.0):.3f}",
+                    f"{result['scoring_breakdown']['vector_similarity']:.3f}",
+                    f"{result['scoring_breakdown']['keyword_overlap']:.3f}",
+                    "Yes" if result['scoring_breakdown']['exact_match'] else "No",
+                    len(result.get("frame_paths", [])),
+                    result.get("timestamp", ""),
+                    (result.get("summary_text", "")[:100] or "").replace("\n", " ")
+                ])
+    
+    return str(output_path)
+
+
+def search_scenes(
+    query: str,
+    limit: int = 5,
+    min_score: float = 0.0,
+    level: Optional[str] = None,
+    export: bool = False,
+    export_format: str = "json",
+    export_file: Optional[str] = None
+) -> Optional[List[Dict[str, Any]]]:
     """Search for scenes matching a natural language query.
     
     Args:
@@ -54,20 +207,39 @@ def search_scenes(query: str, limit: int = 5, min_score: float = 0.0, level: Opt
         print("  - Using different keywords")
         print("  - Lowering the min_score threshold")
         print("  - Checking if scenes have been indexed")
-        return
+        return None
+    
+    # Calculate scores for all results
+    scored_results = []
+    for result in results:
+        score_info = calculate_relevance_score(result, query)
+        scored_result = {
+            **result,
+            "relevance_score": score_info["total_score"],
+            "scoring_breakdown": score_info
+        }
+        scored_results.append(scored_result)
+    
+    # Sort by relevance score (descending)
+    scored_results.sort(key=lambda x: x["relevance_score"], reverse=True)
     
     # Display results
-    print(f"\n✅ Found {len(results)} matching scene(s):\n")
+    print(f"\n✅ Found {len(scored_results)} matching scene(s):\n")
     print("=" * 80)
     
-    for i, scene in enumerate(results, 1):
+    for i, scene in enumerate(scored_results, 1):
         metadata = scene.get("metadata") or {}
         recognized_faces = metadata.get("recognized_faces") if isinstance(metadata, dict) else None
+        score_info = scene.get("scoring_breakdown", {})
         
         print(f"\n[{i}] Record ID: {scene['id']}")
         print(f"    Scene ID: {scene.get('scene_id')}")
         print(f"    Level: {scene.get('level')}")
-        print(f"    Similarity: {scene.get('similarity', 0.0):.3f}")
+        print(f"    Vector Similarity: {scene.get('similarity', 0.0):.3f}")
+        print(f"    📊 Relevance Score: {scene.get('relevance_score', 0.0):.3f}")
+        print(f"       └─ Vector: {score_info.get('vector_similarity', 0.0):.3f} | "
+              f"Keywords: {score_info.get('keyword_overlap', 0.0):.3f} | "
+              f"Exact: {'Yes' if score_info.get('exact_match') else 'No'}")
         print(f"    Timestamp: {scene.get('timestamp', 'N/A')}")
         if scene.get("summary_text"):
             print(f"    Text: {scene['summary_text'][:120]}{'...' if len(scene['summary_text']) > 120 else ''}")
@@ -84,7 +256,20 @@ def search_scenes(query: str, limit: int = 5, min_score: float = 0.0, level: Opt
         
         print("-" * 80)
     
+    # Export if requested
+    if export:
+        export_path = export_results(
+            scored_results[:limit],  # Export only the requested limit
+            query,
+            export_format,
+            export_file
+        )
+        print(f"\n💾 Results exported to: {export_path}")
+        print(f"   Format: {export_format.upper()}")
+        print(f"   Results: {len(scored_results[:limit])} (with relevance scores)")
+    
     print("\n")
+    return scored_results
 
 
 def list_all_scenes(limit: Optional[int] = None):
@@ -137,6 +322,11 @@ Examples:
   python search_scenes.py "person sitting at desk" --limit 10
   python search_scenes.py "outdoor scene" --min-score 0.5
   
+  # Export results with scores
+  python search_scenes.py "blue apron" --limit 5 --export
+  python search_scenes.py "lion" --export --export-format csv
+  python search_scenes.py "hyenas" --export --export-file my_results.json
+  
   # List all scenes
   python search_scenes.py --list
   python search_scenes.py --list --limit 20
@@ -176,12 +366,41 @@ Examples:
         help="List all indexed scenes instead of searching"
     )
     
+    parser.add_argument(
+        "--export",
+        action="store_true",
+        help="Export results to a file (JSON or CSV)"
+    )
+    
+    parser.add_argument(
+        "--export-format",
+        type=str,
+        choices=["json", "csv"],
+        default="json",
+        help="Export format: json or csv (default: json)"
+    )
+    
+    parser.add_argument(
+        "--export-file",
+        type=str,
+        default=None,
+        help="Output file path for export (default: auto-generated filename)"
+    )
+    
     args = parser.parse_args()
     
     if args.list:
         list_all_scenes(limit=args.limit if args.limit != 5 else None)
     elif args.query:
-        search_scenes(args.query, limit=args.limit, min_score=args.min_score, level=args.level)
+        search_scenes(
+            args.query,
+            limit=args.limit,
+            min_score=args.min_score,
+            level=args.level,
+            export=args.export,
+            export_format=args.export_format,
+            export_file=args.export_file
+        )
     else:
         parser.print_help()
         print("\n❌ Error: Please provide a search query or use --list")
