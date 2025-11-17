@@ -47,7 +47,7 @@ class SceneIndexer:
     def __init__(
         self,
         table_name: str = "scene_index",
-        embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+        embedding_model: str = "intfloat/e5-large-v2",
         frames_dir: str = "frames",
         enable_chunking: bool = True,
         chunk_duration: float = 10.0,

@@ -77,7 +77,7 @@ class VideoSummarizer:
         self.langfuse_tracker = LangfuseTracker()
         self.scene_indexer = SceneIndexer(
             table_name=os.getenv("SCENE_INDEX_TABLE", "scene_embeddings"),
-            embedding_model=os.getenv("SCENE_INDEX_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
+            embedding_model=os.getenv("SCENE_INDEX_MODEL", "intfloat/e5-large-v2"),
             frames_dir=os.getenv("SCENE_INDEX_FRAMES_DIR", "frames"),
             enable_chunking=os.getenv("SCENE_INDEX_ENABLE_CHUNKING", "true").lower() == "true",
             chunk_duration=float(os.getenv("SCENE_INDEX_CHUNK_SECONDS", "10")),
