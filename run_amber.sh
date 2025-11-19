@@ -17,8 +17,11 @@ echo "================================================"
 echo ""
 
 # Set LanceDB environment variables (allow overrides, use .env if available)
+# NOTE: API keys should be set in .env file, not hardcoded here
 export LANCEDB_PROJECT_SLUG="${LANCEDB_PROJECT_SLUG:-descvlm2-lnh0lv}"
-export LANCEDB_API_KEY="${LANCEDB_API_KEY:-sk_SJLWUL2G2JDQFLZ5WKKM5DC4KJKIVAV73IECRDHTRSBUAEMY2DSQ====}"
+if [[ -z "$LANCEDB_API_KEY" ]]; then
+    echo "⚠️  Warning: LANCEDB_API_KEY not set. Please set it in .env file."
+fi
 export LANCEDB_REGION="${LANCEDB_REGION:-us-east-1}"
 
 # Get embedding model (default to BAAI/bge-base-en if not set)
@@ -63,9 +66,14 @@ fi
 export SCENE_INDEX_TABLE="$EXPECTED_TABLE"
 
 # Set Langfuse environment variables (allow overrides, use .env if available)
+# NOTE: API keys should be set in .env file, not hardcoded here
 export LANGFUSE_HOST="${LANGFUSE_HOST:-https://cloud.langfuse.com}"
-export LANGFUSE_PUBLIC_KEY="${LANGFUSE_PUBLIC_KEY:-pk-lf-9d51189b-1ff3-4a6c-a899-335651915d99}"
-export LANGFUSE_SECRET_KEY="${LANGFUSE_SECRET_KEY:-sk-lf-b9e367e9-8fd6-44ca-811f-13e7efe87a6e}"
+if [[ -z "$LANGFUSE_PUBLIC_KEY" ]]; then
+    echo "⚠️  Warning: LANGFUSE_PUBLIC_KEY not set. Please set it in .env file."
+fi
+if [[ -z "$LANGFUSE_SECRET_KEY" ]]; then
+    echo "⚠️  Warning: LANGFUSE_SECRET_KEY not set. Please set it in .env file."
+fi
 
 echo "✓ LanceDB Integration:"
 echo "  Project Slug: $LANCEDB_PROJECT_SLUG"

@@ -15,9 +15,14 @@ fi
 echo "Setting up Langfuse environment variables..."
 
 # Use .env values if available, otherwise use defaults
+# NOTE: API keys should be set in .env file, not hardcoded here
 export LANGFUSE_HOST="${LANGFUSE_HOST:-https://cloud.langfuse.com}"
-export LANGFUSE_PUBLIC_KEY="${LANGFUSE_PUBLIC_KEY:-pk-lf-9d51189b-1ff3-4a6c-a899-335651915d99}"
-export LANGFUSE_SECRET_KEY="${LANGFUSE_SECRET_KEY:-sk-lf-b9e367e9-8fd6-44ca-811f-13e7efe87a6e}"
+if [[ -z "$LANGFUSE_PUBLIC_KEY" ]]; then
+    echo "⚠️  Warning: LANGFUSE_PUBLIC_KEY not set. Please set it in .env file."
+fi
+if [[ -z "$LANGFUSE_SECRET_KEY" ]]; then
+    echo "⚠️  Warning: LANGFUSE_SECRET_KEY not set. Please set it in .env file."
+fi
 
 echo "✓ Langfuse environment variables set!"
 echo ""

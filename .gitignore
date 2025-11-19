@@ -35,9 +35,15 @@ env/
 *.swo
 *~
 
-# Environment variables
+# Environment variables and secrets
 .env
 .env.local
+.env.*
+!.env.example
+*.env
+*.key
+*.secret
+.env.bak
 
 # Model cache
 .cache/

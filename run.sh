@@ -20,9 +20,14 @@ echo "================================================"
 echo ""
 
 # Set Langfuse environment variables (allow overrides, use .env if available)
+# NOTE: API keys should be set in .env file, not hardcoded here
 export LANGFUSE_HOST="${LANGFUSE_HOST:-https://cloud.langfuse.com}"
-export LANGFUSE_PUBLIC_KEY="${LANGFUSE_PUBLIC_KEY:-pk-lf-9d51189b-1ff3-4a6c-a899-335651915d99}"
-export LANGFUSE_SECRET_KEY="${LANGFUSE_SECRET_KEY:-sk-lf-b9e367e9-8fd6-44ca-811f-13e7efe87a6e}"
+if [[ -z "$LANGFUSE_PUBLIC_KEY" ]]; then
+    echo "⚠️  Warning: LANGFUSE_PUBLIC_KEY not set. Please set it in .env file."
+fi
+if [[ -z "$LANGFUSE_SECRET_KEY" ]]; then
+    echo "⚠️  Warning: LANGFUSE_SECRET_KEY not set. Please set it in .env file."
+fi
 
 # Set threading variables to prevent segfaults on macOS
 export OMP_NUM_THREADS=1
@@ -32,12 +37,18 @@ export VECLIB_MAXIMUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
 # LanceDB credentials (allow overrides, use .env if available)
+# NOTE: API keys should be set in .env file, not hardcoded here
 export LANCEDB_PROJECT_SLUG="${LANCEDB_PROJECT_SLUG:-descvlm2-lnh0lv}"
-export LANCEDB_API_KEY="${LANCEDB_API_KEY:-sk_SJLWUL2G2JDQFLZ5WKKM5DC4KJKIVAV73IECRDHTRSBUAEMY2DSQ====}"
+if [[ -z "$LANCEDB_API_KEY" ]]; then
+    echo "⚠️  Warning: LANCEDB_API_KEY not set. Please set it in .env file."
+fi
 export LANCEDB_REGION="${LANCEDB_REGION:-us-east-1}"
 
 # OpenAI API key (allow overrides, use .env if available)
-export OPENAI_API_KEY="${OPENAI_API_KEY:-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}"
+# NOTE: API keys should be set in .env file, not hardcoded here
+if [[ -z "$OPENAI_API_KEY" ]]; then
+    echo "⚠️  Warning: OPENAI_API_KEY not set. Please set it in .env file."
+fi
 
 echo "✓ Langfuse credentials set"
 echo "  Host: $LANGFUSE_HOST"
