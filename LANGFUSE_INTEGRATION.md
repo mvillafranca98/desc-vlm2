@@ -34,8 +34,8 @@ pip install langfuse
 
 ```bash
 export LANGFUSE_HOST="https://cloud.langfuse.com"
-export LANGFUSE_PUBLIC_KEY="pk-lf-61ba616e-de46-4d72-a848-753fd9a5b3fb"
-export LANGFUSE_SECRET_KEY="sk-lf-e8c7bb1b-554d-4396-95ad-95c30593d6c8"
+export LANGFUSE_PUBLIC_KEY="pk-lf-your-public-key-here"
+export LANGFUSE_SECRET_KEY="sk-lf-your-secret-key-here"
 ```
 
 **Option B: Use Setup Script**
