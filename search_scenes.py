@@ -173,7 +173,9 @@ def search_scenes(
     level: Optional[str] = None,
     export: bool = False,
     export_format: str = "json",
-    export_file: Optional[str] = None
+    export_file: Optional[str] = None,
+    embedding_model: Optional[str] = None,
+    table_name: Optional[str] = None
 ) -> Optional[List[Dict[str, Any]]]:
     """Search for scenes matching a natural language query.
     
@@ -181,10 +183,27 @@ def search_scenes(
         query: Natural language search query
         limit: Maximum number of results to return
         min_score: Minimum similarity score (0.0 to 1.0)
+        level: Optional level filter (scene, chunk, caption, all)
+        export: Whether to export results
+        export_format: Export format (json or csv)
+        export_file: Optional output file path
+        embedding_model: Optional embedding model name (overrides env var)
+        table_name: Optional table name (overrides env var and auto-generation)
     """
-    # Initialize scene indexer (use same table name as real_time_summarizer.py)
+    from scene_indexer import get_table_name_for_model
+    
+    # Resolve model and table
+    resolved_model = embedding_model or os.getenv("SCENE_INDEX_MODEL", "text-embedding-3-small")
+    resolved_table = table_name or os.getenv("SCENE_INDEX_TABLE")
+    
+    # Auto-generate table name if not provided
+    if not resolved_table:
+        resolved_table = get_table_name_for_model(resolved_model)
+    
+    # Initialize scene indexer with resolved configuration
     indexer = SceneIndexer(
-        table_name=os.getenv("SCENE_INDEX_TABLE", "scene_embeddings")
+        table_name=resolved_table,
+        embedding_model=resolved_model
     )
     
     if not indexer.enabled:
@@ -272,15 +291,28 @@ def search_scenes(
     return scored_results
 
 
-def list_all_scenes(limit: Optional[int] = None):
+def list_all_scenes(limit: Optional[int] = None, embedding_model: Optional[str] = None, table_name: Optional[str] = None):
     """List all indexed scenes.
     
     Args:
         limit: Optional limit on number of scenes to display
+        embedding_model: Optional embedding model name (overrides env var)
+        table_name: Optional table name (overrides env var and auto-generation)
     """
-    # Initialize scene indexer (use same table name as real_time_summarizer.py)
+    from scene_indexer import get_table_name_for_model
+    
+    # Resolve model and table
+    resolved_model = embedding_model or os.getenv("SCENE_INDEX_MODEL", "text-embedding-3-small")
+    resolved_table = table_name or os.getenv("SCENE_INDEX_TABLE")
+    
+    # Auto-generate table name if not provided
+    if not resolved_table:
+        resolved_table = get_table_name_for_model(resolved_model)
+    
+    # Initialize scene indexer with resolved configuration
     indexer = SceneIndexer(
-        table_name=os.getenv("SCENE_INDEX_TABLE", "scene_embeddings")
+        table_name=resolved_table,
+        embedding_model=resolved_model
     )
     
     if not indexer.enabled:
@@ -386,11 +418,27 @@ Examples:
         default=None,
         help="Output file path for export (default: auto-generated filename)"
     )
+    parser.add_argument(
+        "--embedding-model",
+        type=str,
+        default=None,
+        help="Embedding model to use (e.g., 'BAAI/bge-base-en', 'text-embedding-3-small'). Overrides SCENE_INDEX_MODEL env var."
+    )
+    parser.add_argument(
+        "--scene-table",
+        type=str,
+        default=None,
+        help="LanceDB table name to query. Overrides SCENE_INDEX_TABLE env var and auto-generation."
+    )
     
     args = parser.parse_args()
     
     if args.list:
-        list_all_scenes(limit=args.limit if args.limit != 5 else None)
+        list_all_scenes(
+            limit=args.limit if args.limit != 5 else None,
+            embedding_model=args.embedding_model,
+            table_name=args.scene_table
+        )
     elif args.query:
         search_scenes(
             args.query,
@@ -399,7 +447,9 @@ Examples:
             level=args.level,
             export=args.export,
             export_format=args.export_format,
-            export_file=args.export_file
+            export_file=args.export_file,
+            embedding_model=args.embedding_model,
+            table_name=args.scene_table
         )
     else:
         parser.print_help()

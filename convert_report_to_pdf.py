@@ -81,15 +81,29 @@ def convert_with_weasyprint(html_path, pdf_path):
         return False
 
 def main():
-    # Find the most recent HTML report
-    html_files = sorted(Path('.').glob('semantic_query_test_report_*.html'), reverse=True)
+    # Find the most recent HTML report in reports/html directory
+    reports_html_dir = Path('reports/html')
+    reports_html_dir.mkdir(parents=True, exist_ok=True)
     
-    if not html_files:
-        print("❌ No HTML report found. Please run test_semantic_queries.py first.")
+    # Check for model comparison report first, then semantic query reports
+    comparison_files = sorted(reports_html_dir.glob('model_comparison_report_*.html'), reverse=True)
+    query_files = sorted(reports_html_dir.glob('semantic_query_test_report_*.html'), reverse=True)
+    
+    html_file = None
+    if comparison_files:
+        html_file = comparison_files[0]
+        print("📊 Found model comparison report")
+    elif query_files:
+        html_file = query_files[0]
+        print("📊 Found semantic query test report")
+    else:
+        print("❌ No HTML report found. Please run test_semantic_queries.py or generate_model_comparison_report.py first.")
         sys.exit(1)
     
-    html_file = html_files[0]
-    pdf_file = html_file.with_suffix('.pdf')
+    # Save PDF to reports/pdf directory
+    reports_pdf_dir = Path('reports/pdf')
+    reports_pdf_dir.mkdir(parents=True, exist_ok=True)
+    pdf_file = reports_pdf_dir / html_file.with_suffix('.pdf').name
     
     print("=" * 60)
     print("HTML to PDF Converter")
@@ -122,7 +136,7 @@ def main():
     print("❌ Could not convert to PDF.")
     print()
     print("Alternative: Use your browser's Print to PDF feature:")
-    print(f"1. Open: http://localhost:8000/{html_file.name}")
+    print(f"1. Open: http://localhost:8000/reports/html/{html_file.name}")
     print("2. Press Cmd+P (Mac) or Ctrl+P (Windows/Linux)")
     print("3. Select 'Save as PDF'")
     print("4. Click 'Save'")

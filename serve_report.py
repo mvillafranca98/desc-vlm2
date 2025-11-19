@@ -21,8 +21,11 @@ class MyHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         super().end_headers()
 
 def main():
-    # Find the most recent HTML report
-    html_files = sorted(Path('.').glob('semantic_query_test_report_*.html'), reverse=True)
+    # Find the most recent HTML report in reports/html directory
+    reports_html_dir = Path('reports/html')
+    reports_html_dir.mkdir(parents=True, exist_ok=True)
+    
+    html_files = sorted(reports_html_dir.glob('semantic_query_test_report_*.html'), reverse=True)
     
     if not html_files:
         print("❌ No HTML report found. Please run test_semantic_queries.py first.")
@@ -40,13 +43,16 @@ def main():
     print("=" * 60)
     print()
     
-    # Change to the directory containing the report
-    os.chdir(os.path.dirname(os.path.abspath(report_file)))
+    # Change to project root directory (not the report directory)
+    # This allows the server to serve files from the project root
+    project_root = Path(__file__).parent.absolute()
+    os.chdir(project_root)
     
     # Start server
     with socketserver.TCPServer(("", PORT), MyHTTPRequestHandler) as httpd:
-        # Open browser
-        webbrowser.open(f'http://localhost:{PORT}/{os.path.basename(report_file)}')
+        # Open browser with relative path from project root
+        relative_path = report_file.relative_to(project_root)
+        webbrowser.open(f'http://localhost:{PORT}/{relative_path}')
         
         try:
             httpd.serve_forever()

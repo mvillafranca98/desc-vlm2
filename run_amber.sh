@@ -1,17 +1,68 @@
 #!/bin/bash
 
+# Load environment variables from .env file if it exists
+ENV_SCENE_INDEX_TABLE=""
+if [[ -f .env ]]; then
+    echo "📄 Loading environment variables from .env file..."
+    set -a  # Automatically export all variables
+    source .env
+    set +a  # Stop automatically exporting
+    # Save the .env table value to check for mismatches
+    ENV_SCENE_INDEX_TABLE="$SCENE_INDEX_TABLE"
+fi
+
 echo "================================================"
 echo "Amber - Video Scene Search Assistant"
 echo "================================================"
 echo ""
 
-# Set LanceDB environment variables (allow overrides)
+# Set LanceDB environment variables (allow overrides, use .env if available)
 export LANCEDB_PROJECT_SLUG="${LANCEDB_PROJECT_SLUG:-descvlm2-lnh0lv}"
 export LANCEDB_API_KEY="${LANCEDB_API_KEY:-sk_SJLWUL2G2JDQFLZ5WKKM5DC4KJKIVAV73IECRDHTRSBUAEMY2DSQ====}"
 export LANCEDB_REGION="${LANCEDB_REGION:-us-east-1}"
-export SCENE_INDEX_TABLE="${SCENE_INDEX_TABLE:-scene_embeddings}"
 
-# Set Langfuse environment variables (if not already set)
+# Get embedding model (default to BAAI/bge-base-en if not set)
+export SCENE_INDEX_MODEL="${SCENE_INDEX_MODEL:-BAAI/bge-base-en}"
+
+# Derive LanceDB table name based on embedding model
+derive_table_name() {
+    local model="$1"
+    local short="${model##*/}"
+    short="${short//-/_}"
+    # Use tr for lowercase conversion (more compatible than ${var,,})
+    local lower_short=$(echo "$short" | tr '[:upper:]' '[:lower:]')
+    local lower_model=$(echo "$model" | tr '[:upper:]' '[:lower:]')
+
+    if [[ "$lower_short" == *"minilm"* ]]; then
+        echo "scene_embeddings"
+    elif [[ "$lower_short" == *"e5"* ]]; then
+        echo "scene_embeddings_e5"
+    elif [[ "$lower_short" == *"bge"* ]]; then
+        echo "scene_embeddings_bge"
+    elif [[ "$lower_model" == *"text-embedding-3-small"* ]] || [[ "$lower_model" == *"text-embedding-3"* ]]; then
+        echo "scene_embeddings_openai_small"
+    elif [[ "$lower_model" == *"openai"* ]]; then
+        echo "scene_embeddings_openai"
+    else
+        echo "scene_embeddings_${short}"
+    fi
+}
+
+# Always auto-generate table name based on model to ensure dimension match
+EXPECTED_TABLE="$(derive_table_name "$SCENE_INDEX_MODEL")"
+
+# Check if .env has a mismatched table name and warn/override
+if [[ -n "$ENV_SCENE_INDEX_TABLE" ]] && [[ "$ENV_SCENE_INDEX_TABLE" != "$EXPECTED_TABLE" ]]; then
+    echo "⚠️  Warning: .env has SCENE_INDEX_TABLE=$ENV_SCENE_INDEX_TABLE"
+    echo "   But model $SCENE_INDEX_MODEL requires table: $EXPECTED_TABLE"
+    echo "   Auto-correcting to use: $EXPECTED_TABLE"
+    echo ""
+fi
+
+# Always use the model-specific table name (override .env if needed)
+export SCENE_INDEX_TABLE="$EXPECTED_TABLE"
+
+# Set Langfuse environment variables (allow overrides, use .env if available)
 export LANGFUSE_HOST="${LANGFUSE_HOST:-https://cloud.langfuse.com}"
 export LANGFUSE_PUBLIC_KEY="${LANGFUSE_PUBLIC_KEY:-pk-lf-9d51189b-1ff3-4a6c-a899-335651915d99}"
 export LANGFUSE_SECRET_KEY="${LANGFUSE_SECRET_KEY:-sk-lf-b9e367e9-8fd6-44ca-811f-13e7efe87a6e}"
@@ -22,7 +73,7 @@ echo "  Region: ${LANCEDB_REGION}"
 echo "  Table: $SCENE_INDEX_TABLE"
 echo "  Connection: LanceDB Cloud"
 echo "  Vector Search: Enabled (cosine similarity)"
-echo "  Embedding Model: intfloat/e5-large-v2"
+echo "  Embedding Model: $SCENE_INDEX_MODEL"
 echo ""
 
 echo "✓ Langfuse Integration:"
@@ -36,7 +87,7 @@ echo ""
 echo "✓ Models Configuration:"
 echo "  VLM Model: ${VLM_MODEL:-qwen3}"
 echo "  LLM Model: ${LLM_MODEL:-mistralai/Mistral-7B-Instruct-v0.3}"
-echo "  Embedding Model: intfloat/e5-large-v2"
+echo "  Embedding Model: $SCENE_INDEX_MODEL"
 echo "  Note: Models are loaded when running real_time_summarizer.py"
 echo ""
 
@@ -52,7 +103,7 @@ echo ""
 
 # Quick verification of LanceDB connection
 echo "🔍 Verifying LanceDB connection..."
-python << 'PYTHON_VERIFY'
+python << PYTHON_VERIFY
 import os
 import sys
 try:
@@ -60,7 +111,13 @@ try:
     project_slug = os.getenv("LANCEDB_PROJECT_SLUG")
     api_key = os.getenv("LANCEDB_API_KEY")
     region = os.getenv("LANCEDB_REGION", "us-east-1")
-    table_name = os.getenv("SCENE_INDEX_TABLE", "scene_embeddings")
+    table_name = os.getenv("SCENE_INDEX_TABLE") or "scene_embeddings"
+    embedding_model = os.getenv("SCENE_INDEX_MODEL", "BAAI/bge-base-en")
+    
+    # Ensure table_name is not empty
+    if not table_name or table_name.strip() == "":
+        print(f"  ⚠️  Table name is empty, using default")
+        table_name = "scene_embeddings"
     
     if project_slug and api_key:
         db = lancedb.connect(
@@ -68,10 +125,16 @@ try:
             api_key=api_key,
             region=region
         )
-        table = db.open_table(table_name)
-        row_count = table.count_rows()
-        print(f"  ✅ LanceDB connection verified")
-        print(f"  📊 Table '{table_name}' has {row_count} records")
+        try:
+            table = db.open_table(table_name)
+            row_count = table.count_rows()
+            print(f"  ✅ LanceDB connection verified")
+            print(f"  📊 Table '{table_name}' has {row_count} records")
+            print(f"  🤖 Using embedding model: {embedding_model}")
+        except Exception as table_error:
+            print(f"  ⚠️  Table '{table_name}' not found or inaccessible")
+            print(f"  ℹ️  This is normal if you haven't indexed data with {embedding_model} yet")
+            print(f"  ℹ️  The table will be created automatically when you run ./run.sh")
     else:
         print(f"  ⚠️  LanceDB credentials not fully set")
 except Exception as e:

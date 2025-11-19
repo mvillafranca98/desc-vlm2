@@ -40,26 +40,96 @@ except ImportError:
     logger.warning("sentence-transformers library not available")
     SENTENCE_TRANSFORMERS_AVAILABLE = False
 
+# Try to import OpenAI for API-based embeddings
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    logger.warning("openai library not available")
+    OPENAI_AVAILABLE = False
+
+
+def get_table_name_for_model(embedding_model: str, base_table: Optional[str] = None) -> str:
+    """Generate a table name based on the embedding model to avoid dimension mismatches.
+    
+    Different embedding models produce different vector dimensions:
+    - all-MiniLM-L6-v2: 384 dimensions
+    - e5-large-v2: 1024 dimensions  
+    - bge-base-en: 768 dimensions
+    
+    Args:
+        embedding_model: Name of the embedding model
+        base_table: Optional base table name (if None, uses model-specific default)
+        
+    Returns:
+        Table name that includes model identifier
+    """
+    if base_table:
+        # If base table is provided, use it as-is (user override)
+        return base_table
+    
+    # Generate model-specific table name
+    model_short = embedding_model.split("/")[-1]  # Get last part of model name
+    model_short = model_short.replace("-", "_")  # Replace hyphens with underscores
+    
+    # Map common models to simple table names (matching existing pattern)
+    if "minilm" in model_short.lower():
+        return "scene_embeddings"  # Keep original table for MiniLM
+    elif "e5" in model_short.lower() or "e5_large" in model_short.lower():
+        return "scene_embeddings_e5"  # Match existing e5 table pattern
+    elif "bge" in model_short.lower():
+        return "scene_embeddings_bge"  # Simple name like scene_embeddings_e5
+    elif "text-embedding-3-small" in embedding_model.lower() or "text-embedding-3" in embedding_model.lower():
+        return "scene_embeddings_openai_small"  # OpenAI embedding-3-small
+    elif "openai" in embedding_model.lower():
+        return "scene_embeddings_openai"  # Generic OpenAI embeddings
+    else:
+        # Generic fallback - will use actual dimension when model is loaded
+        return f"scene_embeddings_{model_short}"
+
 
 class SceneIndexer:
-    """Manages scene embeddings and semantic search using LanceDB."""
+    """Manages scene embeddings and semantic search using LanceDB.
+    
+    This class handles:
+    - LanceDB connection and table management (model-specific tables)
+    - Embedding generation (local sentence-transformers or OpenAI API)
+    - Scene indexing with multi-level embeddings (scene, chunk, caption)
+    - Semantic search queries
+    
+    Each embedding model uses its own table to avoid dimension mismatches.
+    Table names are auto-generated based on the model (e.g., scene_embeddings_bge for BAAI/bge-base-en).
+    """
     
     def __init__(
         self,
         table_name: str = "scene_index",
-        embedding_model: str = "intfloat/e5-large-v2",
+        embedding_model: str = "text-embedding-3-small",
         frames_dir: str = "frames",
         enable_chunking: bool = True,
         chunk_duration: float = 10.0,
         enable_caption_embeddings: bool = True,
         session_id: Optional[str] = None
     ):
-        self.table_name = table_name
         self.embedding_model_name = embedding_model
+        
+        # Determine table name: use env var if set, otherwise generate model-specific name
+        env_table = os.getenv("SCENE_INDEX_TABLE")
+        if env_table:
+            # User explicitly set table name via environment variable
+            self.table_name = env_table
+        elif table_name == "scene_index":
+            # Default table name - generate model-specific name
+            self.table_name = get_table_name_for_model(embedding_model)
+        else:
+            # User explicitly provided table name in code
+            self.table_name = table_name
         self.frames_dir = Path(frames_dir)
         self.db = None
         self.table = None
         self.embedding_model = None
+        self.openai_client = None
+        self.use_openai_api = False
         self.enabled = False
         self.enable_chunking = enable_chunking
         self.chunk_duration = chunk_duration
@@ -76,20 +146,31 @@ class SceneIndexer:
             logger.warning("LanceDB not available - scene indexing disabled")
             return
         
-        if not SENTENCE_TRANSFORMERS_AVAILABLE:
+        # Check if we need sentence-transformers or OpenAI
+        is_openai_model = "text-embedding" in self.embedding_model_name.lower() or "openai" in self.embedding_model_name.lower()
+        
+        if not is_openai_model and not SENTENCE_TRANSFORMERS_AVAILABLE:
             logger.warning("sentence-transformers not available - scene indexing disabled")
+            return
+        
+        if is_openai_model and not OPENAI_AVAILABLE:
+            logger.warning("openai library not available - scene indexing disabled")
             return
         
         try:
             self._initialize_lancedb()
             self._initialize_embedding_model()
+            # Table name is already set correctly by get_table_name_for_model()
+            logger.info(f"Using table: {self.table_name} (model: {self.embedding_model_name}, dimension: {self.embedding_dim})")
             self._ensure_table_schema()
             self.enabled = True
             logger.info("Scene indexer initialized successfully")
+            logger.info(f"✓ Embedding model: {self.embedding_model_name} ({'OpenAI API' if self.use_openai_api else 'Local'}, {self.embedding_dim} dimensions)")
             logger.info(
-                "Scene indexer config: table=%s, model=%s, chunking=%s (%.1fs), caption_embeddings=%s, session_id=%s",
+                "Scene indexer config: table=%s, model=%s, dimension=%s, chunking=%s (%.1fs), caption_embeddings=%s, session_id=%s",
                 self.table_name,
                 self.embedding_model_name,
+                self.embedding_dim or "unknown",
                 self.enable_chunking,
                 self.chunk_duration,
                 self.enable_caption_embeddings,
@@ -128,20 +209,69 @@ class SceneIndexer:
         try:
             self.table = self.db.open_table(self.table_name)
             logger.info(f"Opened existing table: {self.table_name}")
+            
+            # Check if table dimension matches model dimension (after model is initialized)
+            # This check will be done in _initialize_embedding_model after dimensions are known
         except Exception:
             # Table doesn't exist, will be created on first insert
             logger.info(f"Table {self.table_name} will be created on first insert")
             self.table = None
     
     def _initialize_embedding_model(self):
-        """Initialize the embedding model."""
+        """Initialize the embedding model (local or OpenAI API)."""
         try:
-            logger.info(f"Loading embedding model: {self.embedding_model_name}...")
-            self.embedding_model = SentenceTransformer(self.embedding_model_name)
-            probe_embedding = self.embedding_model.encode(
-                "dimension probe", convert_to_numpy=True
-            )
-            self.embedding_dim = int(len(probe_embedding))
+            # Check if this is an OpenAI model
+            if "text-embedding" in self.embedding_model_name.lower() or "openai" in self.embedding_model_name.lower():
+                if not OPENAI_AVAILABLE:
+                    raise RuntimeError("OpenAI library not available. Install with: pip install openai")
+                
+                # Get API key from environment
+                api_key = os.getenv("OPENAI_API_KEY")
+                if not api_key:
+                    raise RuntimeError(
+                        "OPENAI_API_KEY environment variable not set. "
+                        "Get your API key from https://platform.openai.com/api-keys"
+                    )
+                
+                logger.info(f"Initializing OpenAI embedding model: {self.embedding_model_name}...")
+                self.openai_client = OpenAI(api_key=api_key)
+                self.use_openai_api = True
+                
+                # Get dimension by making a test API call
+                # text-embedding-3-small has 1536 dimensions
+                # text-embedding-3-large has 3072 dimensions
+                # Default to 1536 for small model
+                if "small" in self.embedding_model_name.lower():
+                    self.embedding_dim = 1536
+                elif "large" in self.embedding_model_name.lower():
+                    self.embedding_dim = 3072
+                else:
+                    # Make a test call to get actual dimension
+                    try:
+                        response = self.openai_client.embeddings.create(
+                            model=self.embedding_model_name,
+                            input="dimension probe"
+                        )
+                        self.embedding_dim = len(response.data[0].embedding)
+                    except Exception as e:
+                        logger.warning(f"Could not determine dimension from API call: {e}, defaulting to 1536")
+                        self.embedding_dim = 1536
+                
+                logger.info(f"OpenAI embedding model initialized (dimension: {self.embedding_dim})")
+            else:
+                # Use local sentence-transformers model
+                if not SENTENCE_TRANSFORMERS_AVAILABLE:
+                    raise RuntimeError("sentence-transformers library not available")
+                
+                logger.info(f"Loading embedding model: {self.embedding_model_name}...")
+                self.embedding_model = SentenceTransformer(self.embedding_model_name)
+                probe_embedding = self.embedding_model.encode(
+                    "dimension probe", convert_to_numpy=True
+                )
+                self.embedding_dim = int(len(probe_embedding))
+                logger.info(f"Embedding model loaded successfully (dimension: {self.embedding_dim})")
+            
+            # Create schema with determined dimension
             list_type = pa.list_(pa.float32(), self.embedding_dim)
             self.table_schema = pa.schema([
                 pa.field("id", pa.string()),
@@ -157,7 +287,53 @@ class SceneIndexer:
                 pa.field("scene_end_time", pa.float64()),
                 pa.field("timestamp", pa.float64())
             ])
-            logger.info("Embedding model loaded successfully")
+            
+            # Check if existing table has dimension mismatch
+            if self.table is not None and self.embedding_dim is not None:
+                try:
+                    # Try to get schema to check vector dimension
+                    schema = self.table.schema
+                    for field in schema:
+                        if field.name == "vector":
+                            # Check dimension from the field type
+                            field_type = field.type
+                            table_dim = None
+                            
+                            # Check if it's a FixedSizeListType (has list_size attribute)
+                            if hasattr(field_type, 'list_size'):
+                                table_dim = field_type.list_size
+                            else:
+                                # Fallback: try to get a sample record
+                                try:
+                                    sample = self.table.head(1)
+                                    if sample and len(sample) > 0:
+                                        sample_vector = sample[0].get("vector")
+                                        if sample_vector:
+                                            table_dim = len(sample_vector)
+                                except Exception:
+                                    pass
+                            
+                            if table_dim is not None and table_dim != self.embedding_dim:
+                                expected_table = get_table_name_for_model(self.embedding_model_name)
+                                logger.error(
+                                    f"❌ DIMENSION MISMATCH DETECTED!\n"
+                                    f"   Current table '{self.table_name}' has {table_dim}-dim vectors\n"
+                                    f"   Model '{self.embedding_model_name}' generates {self.embedding_dim}-dim vectors\n"
+                                    f"   Expected table name: '{expected_table}'\n"
+                                    f"   Solution: Remove SCENE_INDEX_TABLE from .env or set it to '{expected_table}'"
+                                )
+                                raise ValueError(
+                                    f"Table dimension mismatch: table has {table_dim} dims, "
+                                    f"model generates {self.embedding_dim} dims. "
+                                    f"Use table '{expected_table}' instead."
+                                )
+                            break
+                except ValueError:
+                    # Re-raise ValueError (dimension mismatch)
+                    raise
+                except Exception as schema_error:
+                    # If we can't check schema, log warning but continue
+                    logger.warning(f"Could not verify table schema dimensions: {schema_error}")
         except Exception as e:
             logger.error(f"Failed to load embedding model: {e}", exc_info=True)
             raise
@@ -264,13 +440,40 @@ class SceneIndexer:
             self.table = None
     
     def generate_embedding(self, text: str) -> np.ndarray:
-        """Generate embedding vector for text."""
-        if not self.enabled or not self.embedding_model:
+        """Generate embedding vector for text.
+        
+        Uses OpenAI API if use_openai_api is True, otherwise uses local sentence-transformers model.
+        
+        Args:
+            text: Input text to embed
+            
+        Returns:
+            numpy array of embedding vector (float32)
+            
+        Raises:
+            RuntimeError: If indexer not initialized or model not available
+        """
+        if not self.enabled:
             raise RuntimeError("Scene indexer not properly initialized")
         
         try:
-            embedding = self.embedding_model.encode(text, convert_to_numpy=True)
-            return embedding
+            if self.use_openai_api:
+                if not self.openai_client:
+                    raise RuntimeError("OpenAI client not initialized")
+                
+                # Call OpenAI API
+                response = self.openai_client.embeddings.create(
+                    model=self.embedding_model_name,
+                    input=text
+                )
+                embedding = np.array(response.data[0].embedding, dtype=np.float32)
+                return embedding
+            else:
+                if not self.embedding_model:
+                    raise RuntimeError("Embedding model not initialized")
+                
+                embedding = self.embedding_model.encode(text, convert_to_numpy=True)
+                return embedding
         except Exception as e:
             logger.error(f"Error generating embedding: {e}", exc_info=True)
             raise
@@ -399,20 +602,28 @@ class SceneIndexer:
             
             # Create table if it doesn't exist, otherwise append
             if self.table is None:
-                self.table = self.db.create_table(
-                    self.table_name,
-                    data=records,
-                    schema=self.table_schema
-                )
-                logger.info(f"Created table: {self.table_name}")
                 try:
-                    self.table.create_index(metric="cosine", vector_column_name="vector")
-                    logger.info("Created vector index for semantic search")
-                except Exception as idx_error:
-                    logger.warning(f"Could not create index (continuing): {idx_error}")
+                    self.table = self.db.create_table(
+                        self.table_name,
+                        data=records,
+                        schema=self.table_schema
+                    )
+                    logger.info(f"✓ Created table: {self.table_name} (dimension: {self.embedding_dim})")
+                    try:
+                        self.table.create_index(metric="cosine", vector_column_name="vector")
+                        logger.info("✓ Created vector index for semantic search")
+                    except Exception as idx_error:
+                        logger.warning(f"Could not create index (continuing): {idx_error}")
+                except Exception as create_error:
+                    logger.error(f"Failed to create LanceDB table '{self.table_name}': {create_error}", exc_info=True)
+                    return None
             else:
-                self.table.add(records)
-                logger.debug(f"Added {len(records)} records for scene: {scene_id}")
+                try:
+                    self.table.add(records)
+                    logger.debug(f"Added {len(records)} records for scene: {scene_id}")
+                except Exception as add_error:
+                    logger.error(f"Failed to add records to LanceDB table: {add_error}", exc_info=True)
+                    return None
             
             logger.info(f"Indexed scene '{scene_id}' with {len(records)} records")
             return scene_id
@@ -729,8 +940,6 @@ class SceneIndexer:
             logger.error(f"Error searching scenes: {e}", exc_info=True)
             return []
     
-    # Backwards compatibility alias
-    search_scenes = query_scenes
     
     def get_all_scenes(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         """Get all indexed scenes.
@@ -750,10 +959,27 @@ class SceneIndexer:
                 return []
             sample_limit = total_rows if limit is None else min(limit, total_rows)
             if self.embedding_dim is None:
-                probe_embedding = self.embedding_model.encode(
-                    "scene listing probe", convert_to_numpy=True
-                )
-                self.embedding_dim = int(len(probe_embedding))
+                # Determine dimension using probe embedding
+                if self.use_openai_api:
+                    if "small" in self.embedding_model_name.lower():
+                        self.embedding_dim = 1536
+                    elif "large" in self.embedding_model_name.lower():
+                        self.embedding_dim = 3072
+                    else:
+                        # Make API call to determine dimension
+                        try:
+                            response = self.openai_client.embeddings.create(
+                                model=self.embedding_model_name,
+                                input="scene listing probe"
+                            )
+                            self.embedding_dim = len(response.data[0].embedding)
+                        except Exception:
+                            self.embedding_dim = 1536  # Default fallback
+                else:
+                    probe_embedding = self.embedding_model.encode(
+                        "scene listing probe", convert_to_numpy=True
+                    )
+                    self.embedding_dim = int(len(probe_embedding))
             zero_vector = np.zeros(self.embedding_dim, dtype=np.float32).tolist()
             records = (
                 self.table

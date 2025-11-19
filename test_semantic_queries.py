@@ -4,116 +4,300 @@ Batch test semantic queries and generate HTML report with images.
 """
 
 import os
+import sys
 import json
 import base64
-from datetime import datetime
+import re
+import argparse
+from datetime import datetime, timedelta
 from pathlib import Path
+
+# Load environment variables from .env file if it exists (before importing other modules)
+# Load .env values and ALWAYS override existing env vars for SCENE_INDEX_* to ensure consistency
+if os.path.exists('.env'):
+    with open('.env', 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                # ALWAYS override existing env vars with .env values for SCENE_INDEX_* vars
+                # This ensures .env takes precedence for these specific variables
+                if key.startswith('SCENE_INDEX_'):
+                    old_value = os.environ.get(key, 'NOT SET')
+                    os.environ[key] = value
+                    # Debug: only show if value changed
+                    if old_value != value and old_value != 'NOT SET':
+                        print(f"🔧 Overriding {key}: {old_value} → {value}", file=sys.stderr)
+                elif key not in os.environ:
+                    os.environ[key] = value
+
 from scene_indexer import SceneIndexer
 from search_scenes import calculate_relevance_score
 
-# All semantic test queries - Based on The Office U.S. TV show content
+# Semantic test queries - Office/Real-world content
 SEMANTIC_QUERIES = [
-    # Office Setting & Environment
-    ("office workspace with desks and computers", "Office Setting"),
-    ("corporate office environment", "Office Setting"),
-    ("indoor workspace with office furniture", "Office Setting"),
-    ("business office setting", "Office Setting"),
-    ("professional workplace interior", "Office Setting"),
-    ("office cubicles and workstations", "Office Setting"),
-    ("conference room or meeting space", "Office Setting"),
-    ("reception area or front desk", "Office Setting"),
-    
-    # People & Characters (semantic variations)
-    ("person sitting at desk", "People & Characters"),
-    ("individual working at computer", "People & Characters"),
-    ("office worker at workstation", "People & Characters"),
-    ("person in business casual attire", "People & Characters"),
-    ("professional dressed individual", "People & Characters"),
-    ("person wearing business clothing", "People & Characters"),
-    ("colleague or coworker", "People & Characters"),
-    ("multiple people in office", "People & Characters"),
-    
-    # Office Activities & Behaviors
-    ("people having a conversation", "Office Activities"),
-    ("individuals engaged in discussion", "Office Activities"),
-    ("people talking or speaking", "Office Activities"),
-    ("person looking at camera", "Office Activities"),
-    ("individual making facial expression", "Office Activities"),
-    ("people in a meeting", "Office Activities"),
-    ("group discussion or conversation", "Office Activities"),
-    ("person typing or using computer", "Office Activities"),
-    ("individual on phone call", "Office Activities"),
-    ("person writing or taking notes", "Office Activities"),
-    ("people laughing or smiling", "Office Activities"),
-    ("person showing emotion or reaction", "Office Activities"),
-    
-    # Office Furniture & Objects
-    ("desk with computer monitor", "Office Objects"),
-    ("office chair and workstation", "Office Objects"),
-    ("office desk with items", "Office Objects"),
-    ("computer screen or monitor", "Office Objects"),
-    ("office supplies or stationery", "Office Objects"),
-    ("telephone or phone on desk", "Office Objects"),
-    ("office equipment or electronics", "Office Objects"),
-    ("whiteboard or bulletin board", "Office Objects"),
-    
-    # Emotions & Expressions (Office-specific)
-    ("person with awkward expression", "Emotions & Expressions"),
-    ("individual showing confusion", "Emotions & Expressions"),
-    ("person with surprised look", "Emotions & Expressions"),
-    ("individual displaying frustration", "Emotions & Expressions"),
-    ("person with amused expression", "Emotions & Expressions"),
-    ("individual showing disbelief", "Emotions & Expressions"),
-    ("person with serious or concerned look", "Emotions & Expressions"),
-    ("person making eye contact with camera", "Emotions & Expressions"),
-    
-    # Office Interactions & Scenarios
-    ("awkward office moment", "Office Interactions"),
-    ("humorous workplace situation", "Office Interactions"),
-    ("office prank or joke", "Office Interactions"),
-    ("tense or uncomfortable conversation", "Office Interactions"),
-    ("casual office interaction", "Office Interactions"),
-    ("professional meeting or presentation", "Office Interactions"),
-    ("people collaborating or working together", "Office Interactions"),
-    ("office social interaction", "Office Interactions"),
-    
-    # Complex Multi-Concept Queries
-    ("person sitting at desk talking to someone", "Complex Scenarios"),
-    ("office worker having conversation in workspace", "Complex Scenarios"),
-    ("multiple people in office having discussion", "Complex Scenarios"),
-    ("individual at computer in office setting", "Complex Scenarios"),
-    ("person in business attire in office environment", "Complex Scenarios"),
-    ("office scene with people and furniture", "Complex Scenarios"),
-    ("workplace setting with employees and desks", "Complex Scenarios"),
-    ("professional office environment with people working", "Complex Scenarios"),
-    
-    # Abstract Concepts
-    ("workplace atmosphere", "Abstract Concepts"),
-    ("office culture or environment", "Abstract Concepts"),
-    ("professional setting", "Abstract Concepts"),
-    ("corporate workspace", "Abstract Concepts"),
-    ("business environment", "Abstract Concepts"),
+    ("A person holding a rock", "Objects & Actions"),
+    ("A YouTube video shown on a screen", "Media & Technology"),
+    ("A shelf with office supplies", "Office Environment"),
+    ("Night time in the office", "Time & Environment"),
+    ("People in a van", "Vehicles"),
+    ("People in a car", "Vehicles"),
+    ("Someone speaking on the phone while seated in the desk", "Office Activities"),
+    ("An office printer", "Office Equipment"),
+    ("People wearing casual clothing", "People & Clothing"),
+    ("People wearing office clothing", "People & Clothing"),
+    ("A yellow cardigan", "People & Clothing"),
 ]
 
-def test_queries_and_generate_report():
-    """Run all semantic queries and generate HTML report."""
+
+def parse_time_filter(time_str: str) -> tuple[datetime | None, datetime | None]:
+    """Parse natural language time expressions for filtering.
+    
+    Args:
+        time_str: Time expression like "past 15 minutes", "past 2 hours", "yesterday", "last week"
+        
+    Returns:
+        (start_time, end_time) tuple, or (None, None) if invalid
+    """
+    if not time_str:
+        return None, None
+    
+    time_str_lower = time_str.lower().strip()
+    now = datetime.now()
+    
+    # Patterns for time expressions
+    patterns = {
+        'yesterday': (now - timedelta(days=1), now),
+        'today': (now.replace(hour=0, minute=0, second=0, microsecond=0), now),
+        'past 15 minutes': (now - timedelta(minutes=15), now),
+        'past 30 minutes': (now - timedelta(minutes=30), now),
+        'past 1 hour': (now - timedelta(hours=1), now),
+        'past 2 hours': (now - timedelta(hours=2), now),
+        'past 3 hours': (now - timedelta(hours=3), now),
+        'past 6 hours': (now - timedelta(hours=6), now),
+        'past 12 hours': (now - timedelta(hours=12), now),
+        'past 24 hours': (now - timedelta(hours=24), now),
+        'past 3 days': (now - timedelta(days=3), now),
+        'past week': (now - timedelta(days=7), now),
+        'past 2 weeks': (now - timedelta(days=14), now),
+        'past month': (now - timedelta(days=30), now),
+        'last week': (now - timedelta(days=7), now),
+        'last 2 weeks': (now - timedelta(days=14), now),
+        'last month': (now - timedelta(days=30), now),
+    }
+    
+    # Check for exact pattern matches
+    for pattern, (start, end) in patterns.items():
+        if pattern in time_str_lower:
+            return start, end
+    
+    # Check for "past X minutes" pattern (supports decimals like "past 0.25 hours" = 15 minutes)
+    minutes_match = re.search(r'past\s+(\d+(?:\.\d+)?)\s+minutes?', time_str_lower)
+    if minutes_match:
+        minutes = float(minutes_match.group(1))
+        return now - timedelta(minutes=minutes), now
+    
+    # Check for "past X hours" pattern (supports decimals like "past 0.25 hours")
+    hours_match = re.search(r'past\s+(\d+(?:\.\d+)?)\s+hours?', time_str_lower)
+    if hours_match:
+        hours = float(hours_match.group(1))
+        return now - timedelta(hours=hours), now
+    
+    # Check for "past X days" pattern
+    days_match = re.search(r'past\s+(\d+)\s+days?', time_str_lower)
+    if days_match:
+        days = int(days_match.group(1))
+        return now - timedelta(days=days), now
+    
+    # Check for "last X minutes" pattern
+    last_minutes_match = re.search(r'last\s+(\d+(?:\.\d+)?)\s+minutes?', time_str_lower)
+    if last_minutes_match:
+        minutes = float(last_minutes_match.group(1))
+        return now - timedelta(minutes=minutes), now
+    
+    # Check for "last X hours" pattern
+    last_hours_match = re.search(r'last\s+(\d+)\s+hours?', time_str_lower)
+    if last_hours_match:
+        hours = int(last_hours_match.group(1))
+        return now - timedelta(hours=hours), now
+    
+    # Check for "last X days" pattern
+    last_days_match = re.search(r'last\s+(\d+)\s+days?', time_str_lower)
+    if last_days_match:
+        days = int(last_days_match.group(1))
+        return now - timedelta(days=days), now
+    
+    # Check for "X hours ago" pattern
+    hours_ago_match = re.search(r'(\d+)\s+hours?\s+ago', time_str_lower)
+    if hours_ago_match:
+        hours = int(hours_ago_match.group(1))
+        start = now - timedelta(hours=hours)
+        return start, now
+    
+    # Check for "X days ago" pattern
+    days_ago_match = re.search(r'(\d+)\s+days?\s+ago', time_str_lower)
+    if days_ago_match:
+        days = int(days_ago_match.group(1))
+        start = now - timedelta(days=days)
+        return start, now
+    
+    return None, None
+
+
+def filter_results_by_time(results: list, start_time: datetime | None, end_time: datetime | None) -> list:
+    """Filter search results by timestamp.
+    
+    Args:
+        results: List of search result dictionaries
+        start_time: Minimum timestamp (inclusive)
+        end_time: Maximum timestamp (inclusive)
+        
+    Returns:
+        Filtered list of results
+    """
+    if start_time is None and end_time is None:
+        return results
+    
+    filtered = []
+    for result in results:
+        timestamp = result.get("timestamp", 0)
+        if not timestamp:
+            continue
+        
+        try:
+            result_time = datetime.fromtimestamp(timestamp)
+            
+            # Check if result is within time range
+            if start_time and result_time < start_time:
+                continue
+            if end_time and result_time > end_time:
+                continue
+            
+            filtered.append(result)
+        except (ValueError, OSError, TypeError):
+            # Invalid timestamp, skip
+            continue
+    
+    return filtered
+
+
+def test_queries_and_generate_report(
+    time_filter: str | None = None,
+    embedding_model: str | None = None,
+    table_name: str | None = None
+):
+    """Run all semantic queries and generate HTML report.
+    
+    Args:
+        time_filter: Optional time filter string (e.g., "past 2 hours", "yesterday", "last week").
+                    Defaults to "past 24 hours" if not specified.
+        embedding_model: Optional embedding model name (overrides env var)
+        table_name: Optional table name (overrides env var and auto-generation)
+    """
     print("=" * 60)
     print("Semantic Query Batch Testing")
     print("=" * 60)
     print()
     
+    # Default to no time filter (search all data) if not specified
+    # User can explicitly set --time-filter "past 24 hours" if they want time filtering
+    if time_filter is None:
+        time_filter = ""  # No filter by default - search all data
+        print("⏰ No time filter specified - searching all indexed data")
+        print("   (Use --time-filter \"past 24 hours\" to filter recent data, or --time-filter \"past 3 days\" for longer window)")
+        print()
+    elif time_filter == "":
+        print("⏰ No time filter specified - searching all indexed data")
+        print()
+    
+    # Parse time filter
+    start_time = None
+    end_time = None
+    time_filter_str = ""
+    if time_filter and time_filter.strip():
+        start_time, end_time = parse_time_filter(time_filter)
+        if start_time is None and end_time is None:
+            print(f"⚠️  Warning: Could not parse time filter '{time_filter}', ignoring it")
+        else:
+            time_filter_str = f" (filtered: {time_filter})"
+            print(f"⏰ Time filter: {time_filter}")
+            print(f"   From: {start_time.strftime('%Y-%m-%d %H:%M:%S') if start_time else 'beginning'}")
+            print(f"   To:   {end_time.strftime('%Y-%m-%d %H:%M:%S') if end_time else 'now'}")
+            print()
+    
     # Initialize scene indexer
-    indexer = SceneIndexer(
-        table_name=os.getenv("SCENE_INDEX_TABLE", "scene_embeddings"),
-        embedding_model=os.getenv("SCENE_INDEX_MODEL", "intfloat/e5-large-v2")
-    )
+    from scene_indexer import get_table_name_for_model
+    
+    # Get model - prioritize argument, then .env, then default
+    # Force use of .env value if it exists (already loaded at top of file)
+    resolved_model = embedding_model or os.getenv("SCENE_INDEX_MODEL", "text-embedding-3-small")
+    
+    # Normalize model names (handle short names)
+    model_aliases = {
+        'e5-large-v2': 'intfloat/e5-large-v2',
+        'bge-base-en': 'BAAI/bge-base-en',
+        'minilm': 'sentence-transformers/all-MiniLM-L6-v2',
+        'minilm-l6-v2': 'sentence-transformers/all-MiniLM-L6-v2',
+    }
+    
+    # Check if it's a short name and expand it
+    if resolved_model in model_aliases:
+        resolved_model = model_aliases[resolved_model]
+        print(f"📝 Expanded model alias to: {resolved_model}")
+    # Also check if it's a partial match (e.g., "e5-large-v2" -> "intfloat/e5-large-v2")
+    elif resolved_model == "e5-large-v2" or resolved_model.endswith("/e5-large-v2"):
+        if not resolved_model.startswith("intfloat/"):
+            resolved_model = "intfloat/e5-large-v2"
+            print(f"📝 Expanded model name to: {resolved_model}")
+    
+    # Always auto-generate table name based on model to ensure dimension match
+    # This overrides .env/shell env if it has a mismatched table name (like run.sh and run_amber.sh do)
+    expected_table = get_table_name_for_model(resolved_model)
+    
+    # Get table - prioritize argument, then check if .env/shell has a value
+    resolved_table = table_name or os.getenv("SCENE_INDEX_TABLE")
+    
+    # Always use the model-specific table (override any mismatched values)
+    if resolved_table and resolved_table != expected_table:
+        print(f"⚠️  Warning: SCENE_INDEX_TABLE={resolved_table} doesn't match model {resolved_model}")
+        print(f"   Auto-correcting to use: {expected_table}")
+        print()
+        resolved_table = expected_table
+    elif not resolved_table:
+        resolved_table = expected_table
+        print(f"📊 Using model-specific table: {resolved_table}")
+    else:
+        # Table matches expected - use it
+        print(f"📊 Using table: {resolved_table}")
+    
+    print(f"📊 Embedding model: {resolved_model}")
+    print()
+    
+    # Temporarily unset SCENE_INDEX_TABLE in environment so SceneIndexer uses the parameter
+    # instead of the environment variable (which might be wrong)
+    old_table_env = os.environ.pop("SCENE_INDEX_TABLE", None)
+    
+    try:
+        indexer = SceneIndexer(
+            table_name=resolved_table,
+            embedding_model=resolved_model
+        )
+    finally:
+        # Restore the environment variable if it was set (for other code that might need it)
+        if old_table_env:
+            os.environ["SCENE_INDEX_TABLE"] = old_table_env
     
     if not indexer.enabled:
         print("❌ Scene indexer is not enabled. Please check LanceDB configuration.")
         return
     
     print(f"✓ Scene indexer initialized")
-    print(f"✓ Testing {len(SEMANTIC_QUERIES)} semantic queries")
+    print(f"  Model: {indexer.embedding_model_name} ({'OpenAI API' if indexer.use_openai_api else 'Local'})")
+    print(f"  Table: {indexer.table_name}")
+    print(f"  Dimension: {indexer.embedding_dim}")
+    print(f"✓ Testing {len(SEMANTIC_QUERIES)} semantic queries{time_filter_str}")
     print()
     
     # Run all queries
@@ -121,8 +305,12 @@ def test_queries_and_generate_report():
     for query, category in SEMANTIC_QUERIES:
         print(f"Testing: '{query}' ({category})...", end=" ")
         
-        # Perform search
-        results = indexer.query_scenes(query, limit=5, min_similarity=0.0)
+        # Perform search (get more results to account for time filtering)
+        results = indexer.query_scenes(query, limit=20, min_similarity=0.0)
+        
+        # Apply time filter if specified
+        if start_time is not None or end_time is not None:
+            results = filter_results_by_time(results, start_time, end_time)
         
         # Calculate relevance scores
         scored_results = []
@@ -146,17 +334,43 @@ def test_queries_and_generate_report():
         })
         
         print(f"Found {len(results)} results")
+        
+        # Warn if no results found with time filter
+        if len(results) == 0 and start_time is not None:
+            print("   ⚠️  No results in time range - try a longer window or remove time filter")
     
     print()
     print("=" * 60)
+    
+    # Summary before generating report
+    total_with_results = sum(1 for r in all_results if r['total_found'] > 0)
+    if total_with_results == 0 and start_time is not None:
+        print("⚠️  No results found for any query in the specified time range.")
+        print("   Suggestions:")
+        print("   - Try a longer time window: --time-filter \"past 48 hours\"")
+        print("   - Try a different time period: --time-filter \"past 3 days\"")
+        print("   - Search all data: --time-filter \"\"")
+        print()
+    
     print("Generating HTML report...")
+    
+    # Create reports directory if it doesn't exist
+    reports_dir = Path("reports/html")
+    reports_dir.mkdir(parents=True, exist_ok=True)
     
     # Save report
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_path = f"semantic_query_test_report_{timestamp}.html"
+    report_filename = f"semantic_query_test_report_{timestamp}.html"
+    report_path = reports_dir / report_filename
     
-    # Generate HTML report (pass report_path for image path resolution)
-    html_content = generate_html_report(all_results, report_path)
+    # Generate HTML report (pass report_path for image path resolution and metadata)
+    html_content = generate_html_report(
+        all_results, 
+        str(report_path), 
+        time_filter=time_filter,
+        embedding_model=resolved_model,
+        table_name=resolved_table
+    )
     
     with open(report_path, 'w', encoding='utf-8') as f:
         f.write(html_content)
@@ -174,8 +388,38 @@ def test_queries_and_generate_report():
     
     return report_path
 
-def generate_html_report(all_results, report_path=None):
-    """Generate HTML report with embedded images."""
+def generate_html_report(all_results, report_path=None, time_filter=None, embedding_model=None, table_name=None):
+    """Generate HTML report with embedded images.
+    
+    Args:
+        all_results: List of query results
+        report_path: Optional path to report file (for image path resolution)
+        time_filter: Optional time filter string to display in report
+        embedding_model: Optional embedding model name to display in report
+        table_name: Optional table name to display in report
+    """
+    # Get time filter info for report
+    time_filter_info = ""
+    if time_filter:
+        start_time, end_time = parse_time_filter(time_filter)
+        if start_time or end_time:
+            time_filter_info = f"<p><strong>Time Filter:</strong> {time_filter} "
+            if start_time:
+                time_filter_info += f"(from {start_time.strftime('%Y-%m-%d %H:%M:%S')}) "
+            if end_time:
+                time_filter_info += f"(to {end_time.strftime('%Y-%m-%d %H:%M:%S')})"
+            time_filter_info += "</p>"
+    
+    # Get model/table info for report
+    model_info = ""
+    if embedding_model or table_name:
+        model_info = "<p><strong>Configuration:</strong> "
+        if embedding_model:
+            model_info += f"Model: {embedding_model} "
+        if table_name:
+            model_info += f"| Table: {table_name}"
+        model_info += "</p>"
+    
     html = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -317,6 +561,8 @@ def generate_html_report(all_results, report_path=None):
 <body>
     <h1>🎯 Semantic Query Test Results</h1>
     <p class="timestamp">Generated: """ + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + """</p>
+    """ + (model_info if model_info else "") + """
+    """ + (time_filter_info if time_filter_info else "") + """
 """
     
     # Group by category
@@ -429,5 +675,129 @@ def generate_html_report(all_results, report_path=None):
     return html
 
 if __name__ == "__main__":
-    test_queries_and_generate_report()
-
+    parser = argparse.ArgumentParser(
+        description="Test semantic queries and generate HTML report",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Test all queries with default model (searches all data by default)
+  python test_semantic_queries.py
+  
+  # Test with specific embedding model (searches all data by default)
+  python test_semantic_queries.py --embedding-model "BAAI/bge-base-en"
+  python test_semantic_queries.py --embedding-model "text-embedding-3-small"
+  
+  # Test all 4 models and generate comparison reports (searches all data by default)
+  python test_semantic_queries.py --all-models
+  
+  # Add time filter to search recent data only
+  python test_semantic_queries.py --time-filter "past 15 minutes"
+  python test_semantic_queries.py --time-filter "past 30 minutes"
+  python test_semantic_queries.py --time-filter "past 0.25 hours"  # Same as 15 minutes
+  python test_semantic_queries.py --time-filter "past 24 hours"
+  python test_semantic_queries.py --time-filter "past 2 hours"
+  python test_semantic_queries.py --time-filter "yesterday"
+  python test_semantic_queries.py --embedding-model "BAAI/bge-base-en" --time-filter "past 3 days"
+  
+  # Test with specific table (searches all data by default)
+  python test_semantic_queries.py --scene-table "scene_embeddings_bge"
+  
+  # Explicitly search all time (same as default now)
+  python test_semantic_queries.py --time-filter ""
+  
+Supported embedding models:
+  - BAAI/bge-base-en (768 dimensions)
+  - intfloat/e5-large-v2 (1024 dimensions)
+  - sentence-transformers/all-MiniLM-L6-v2 (384 dimensions)
+  - text-embedding-3-small (1536 dimensions, requires OPENAI_API_KEY)
+  
+Supported time filters:
+  - "past X minutes" (e.g., "past 15 minutes", "past 30 minutes")
+  - "past X hours" (e.g., "past 2 hours", "past 12 hours", "past 0.25 hours" = 15 minutes)
+  - "past X days" (e.g., "past 3 days", "past 7 days")
+  - "last X minutes" (e.g., "last 15 minutes", "last 30 minutes")
+  - "last X hours" (e.g., "last 6 hours")
+  - "last X days" (e.g., "last 2 days")
+  - "yesterday"
+  - "today"
+  - "past week"
+  - "last week"
+  - "past month"
+  - "last month"
+        """
+    )
+    parser.add_argument(
+        "--time-filter",
+        type=str,
+        default=None,
+        help="Filter results by time period (e.g., 'past 2 hours', 'yesterday', 'last week'). Defaults to no filter (search all data) if not specified."
+    )
+    parser.add_argument(
+        "--embedding-model",
+        type=str,
+        default=None,
+        help="Embedding model to use (e.g., 'BAAI/bge-base-en', 'text-embedding-3-small'). Overrides SCENE_INDEX_MODEL env var."
+    )
+    parser.add_argument(
+        "--scene-table",
+        type=str,
+        default=None,
+        help="LanceDB table name to query. Overrides SCENE_INDEX_TABLE env var and auto-generation."
+    )
+    parser.add_argument(
+        "--all-models",
+        action="store_true",
+        help="Test all 4 embedding models and generate comparison reports"
+    )
+    
+    args = parser.parse_args()
+    
+    # Define all available models
+    ALL_MODELS = [
+        ("BAAI/bge-base-en", "BGE Base EN (768 dim)"),
+        ("intfloat/e5-large-v2", "E5 Large v2 (1024 dim)"),
+        ("sentence-transformers/all-MiniLM-L6-v2", "MiniLM L6 v2 (384 dim)"),
+        ("text-embedding-3-small", "OpenAI Small (1536 dim)"),
+    ]
+    
+    if args.all_models:
+        # Cycle through all models and generate reports
+        print("=" * 70)
+        print("Testing All Embedding Models")
+        print("=" * 70)
+        print()
+        
+        all_reports = []
+        for model_name, model_desc in ALL_MODELS:
+            print(f"\n{'='*70}")
+            print(f"Testing: {model_desc}")
+            print(f"Model: {model_name}")
+            print(f"{'='*70}\n")
+            
+            try:
+                report_path = test_queries_and_generate_report(
+                    time_filter=args.time_filter,
+                    embedding_model=model_name,
+                    table_name=None  # Auto-generate table name
+                )
+                if report_path:
+                    all_reports.append((model_name, model_desc, report_path))
+            except Exception as e:
+                print(f"❌ Error testing {model_name}: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        # Summary
+        print("\n" + "=" * 70)
+        print("All Models Test Summary")
+        print("=" * 70)
+        for model_name, model_desc, report_path in all_reports:
+            print(f"✓ {model_desc}: {report_path}")
+        print("=" * 70)
+    else:
+        # Single model test
+        test_queries_and_generate_report(
+            time_filter=args.time_filter,
+            embedding_model=args.embedding_model,
+            table_name=args.scene_table
+        )

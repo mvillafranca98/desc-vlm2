@@ -60,7 +60,9 @@ class VideoSummarizer:
         vlm_url: str = "http://38.80.152.249:30447/v1",
         vlm_model: str = "qwen3",
         reference_faces_dir: str = "reference_faces",
-        caption_interval: float = 5.0  # Generate caption every 5 seconds
+        caption_interval: float = 5.0,  # Generate caption every 5 seconds
+        scene_index_model: Optional[str] = None,
+        scene_index_table: Optional[str] = None
     ):
         self.camera_index = camera_index
         self.fps = fps
@@ -75,14 +77,29 @@ class VideoSummarizer:
         self.llm_summarizer = LLMSummarizer()
         self.face_recognizer = FaceRecognizer(reference_faces_dir)
         self.langfuse_tracker = LangfuseTracker()
+        
+        # Resolve embedding configuration for scene indexing
+        embedding_model = scene_index_model or os.getenv("SCENE_INDEX_MODEL", "text-embedding-3-small")
+        table_name = scene_index_table or os.getenv("SCENE_INDEX_TABLE")  # None if not set
+        
+        # Let SceneIndexer auto-generate model-specific table name if SCENE_INDEX_TABLE not set
         self.scene_indexer = SceneIndexer(
-            table_name=os.getenv("SCENE_INDEX_TABLE", "scene_embeddings"),
-            embedding_model=os.getenv("SCENE_INDEX_MODEL", "intfloat/e5-large-v2"),
+            table_name=table_name if table_name else "scene_index",  # Use default to trigger auto-generation
+            embedding_model=embedding_model,
             frames_dir=os.getenv("SCENE_INDEX_FRAMES_DIR", "frames"),
             enable_chunking=os.getenv("SCENE_INDEX_ENABLE_CHUNKING", "true").lower() == "true",
             chunk_duration=float(os.getenv("SCENE_INDEX_CHUNK_SECONDS", "10")),
             enable_caption_embeddings=os.getenv("SCENE_INDEX_ENABLE_CAPTION", "true").lower() == "true"
         )
+        
+        # Log embedding model configuration
+        if self.scene_indexer.enabled:
+            logger.info(f"✓ Scene indexing enabled")
+            logger.info(f"  Model: {self.scene_indexer.embedding_model_name}")
+            logger.info(f"  Table: {self.scene_indexer.table_name}")
+            logger.info(f"  Dimension: {self.scene_indexer.embedding_dim}")
+        else:
+            logger.warning("⚠ Scene indexing disabled - check LanceDB configuration")
         
         # State management
         self.latest_caption = "Waiting for first frame..."
@@ -91,6 +108,8 @@ class VideoSummarizer:
         self.last_summary_time = 0
         self.last_caption_time = 0  # Track when last caption was generated
         self.summary_interval = 60  # Update summary every 60 seconds (1 minute)
+        self.last_langfuse_flush_time = 0  # Track when Langfuse was last flushed
+        self.langfuse_flush_interval = 30  # Flush Langfuse every 30 seconds
         
         # Frame storage for scene indexing
         self.scene_frames = []  # Store frames for current scene
@@ -323,6 +342,13 @@ class VideoSummarizer:
                                 
                                 self.langfuse_tracker.client.update_current_generation(**update_params)
                                 
+                                # Flush Langfuse after summary update (important event)
+                                try:
+                                    self.langfuse_tracker.flush()
+                                    logger.debug("Langfuse events flushed (after summary update)")
+                                except Exception as e:
+                                    logger.warning(f"Error flushing Langfuse after summary update: {e}")
+                                
                                 # Index scene in LanceDB for semantic search
                                 if not self.scene_indexer.enabled:
                                     logger.debug("Scene indexing skipped: indexer not enabled")
@@ -383,6 +409,7 @@ class VideoSummarizer:
                                             index_start = time.time()
                                             indexed_id = None
                                             try:
+                                                # Index scene (non-blocking: process_frame runs in thread pool)
                                                 indexed_id = self.scene_indexer.index_scene(
                                                     scene_id=scene_id,
                                                     frame_paths=frame_paths,
@@ -397,6 +424,13 @@ class VideoSummarizer:
                                                 
                                                 if indexed_id:
                                                     logger.info(f"Scene indexed: {indexed_id} with {len(frame_paths)} frames")
+                                                    
+                                                    # Flush Langfuse after scene indexing (important event)
+                                                    try:
+                                                        self.langfuse_tracker.flush()
+                                                        logger.debug("Langfuse events flushed (after scene indexing)")
+                                                    except Exception as e:
+                                                        logger.warning(f"Error flushing Langfuse after scene indexing: {e}")
                                                     
                                                     from datetime import datetime
                                                     self.langfuse_tracker.client.update_current_generation(
@@ -732,6 +766,15 @@ class VideoSummarizer:
                         self.running = False
                         break
                     
+                    # Periodic Langfuse flush (every 30 seconds)
+                    if current_time - self.last_langfuse_flush_time >= self.langfuse_flush_interval:
+                        try:
+                            self.langfuse_tracker.flush()
+                            self.last_langfuse_flush_time = current_time
+                            logger.debug("Langfuse events flushed (periodic)")
+                        except Exception as e:
+                            logger.warning(f"Error during periodic Langfuse flush: {e}")
+                    
                     # Small delay to allow async tasks to execute
                     await asyncio.sleep(0.001)
                 else:
@@ -838,12 +881,26 @@ async def main():
     parser = argparse.ArgumentParser(description='Real-Time Video Summarization System')
     parser.add_argument('--camera', type=int, default=0, help='Camera device index (default: 0)')
     parser.add_argument('--fps', type=int, default=4, help='Frames per second to process (default: 4)')
+    parser.add_argument(
+        '--embedding-model',
+        type=str,
+        default=os.getenv("SCENE_INDEX_MODEL"),
+        help='Embedding model to use for LanceDB exports (overrides SCENE_INDEX_MODEL env)'
+    )
+    parser.add_argument(
+        '--scene-table',
+        type=str,
+        default=os.getenv("SCENE_INDEX_TABLE"),
+        help='Scene index table name (overrides SCENE_INDEX_TABLE env)'
+    )
     args = parser.parse_args()
     
     # Create and run summarizer
     summarizer = VideoSummarizer(
         camera_index=args.camera,
-        fps=args.fps
+        fps=args.fps,
+        scene_index_model=args.embedding_model,
+        scene_index_table=args.scene_table
     )
     
     await summarizer.run()
@@ -851,4 +908,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-

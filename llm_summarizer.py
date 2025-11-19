@@ -45,6 +45,10 @@ class LLMSummarizer:
         try:
             logger.info(f"Loading LLM model: {self.model_name}...")
             
+            # Suppress transformers library verbose output about pretrained models
+            import transformers
+            transformers.logging.set_verbosity_error()
+            
             self.tokenizer = AutoTokenizer.from_pretrained(
                 self.model_name,
                 trust_remote_code=True

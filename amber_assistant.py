@@ -174,11 +174,25 @@ class AmberAssistant:
     def _initialize_indexer(self):
         """Initialize the scene indexer."""
         try:
+            from scene_indexer import get_table_name_for_model
+            
+            # Get embedding model from environment or use default
+            embedding_model = os.getenv("SCENE_INDEX_MODEL", "text-embedding-3-small")
+            table_name = os.getenv("SCENE_INDEX_TABLE")
+            
+            # Auto-generate table name if not explicitly set
+            if not table_name:
+                table_name = get_table_name_for_model(embedding_model)
+                logger.info(f"Auto-generated table name: {table_name} for model: {embedding_model}")
+            
             self.indexer = SceneIndexer(
-                table_name=os.getenv("SCENE_INDEX_TABLE", "scene_embeddings")
+                table_name=table_name,
+                embedding_model=embedding_model
             )
             if not self.indexer.enabled:
                 self.add_message("Amber", "⚠️ Scene indexer is not enabled. Please check LanceDB configuration.", "error")
+            else:
+                logger.info(f"Amber initialized with model: {embedding_model}, table: {table_name}")
         except Exception as e:
             logger.error(f"Failed to initialize indexer: {e}", exc_info=True)
             self.add_message("Amber", f"⚠️ Error initializing scene indexer: {e}", "error")
@@ -212,13 +226,17 @@ class AmberAssistant:
                 else:
                     status_lines.append(f"   ⚠️  Table: Not accessible")
                 
-                # Check embedding model
-                if self.indexer.embedding_model:
+                # Check embedding model (works for both local and OpenAI models)
+                if self.indexer.use_openai_api or self.indexer.embedding_model:
                     model_name = self.indexer.embedding_model_name
+                    model_type = "OpenAI API" if self.indexer.use_openai_api else "Local"
                     status_lines.append(f"   🤖 Embedding Model: {model_name}")
+                    status_lines.append(f"   📦 Model Type: {model_type}")
+                    status_lines.append(f"   📏 Dimension: {self.indexer.embedding_dim}")
                     status_lines.append(f"   ✅ Model Status: Loaded and ready")
                 else:
                     status_lines.append(f"   ⚠️  Embedding Model: Not loaded")
+                    status_lines.append(f"   ℹ️  Model will be loaded when first query is made")
                     
             except Exception as e:
                 status_lines.append(f"   ❌ Error checking LanceDB: {str(e)[:100]}")

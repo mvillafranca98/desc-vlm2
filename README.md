@@ -61,6 +61,33 @@ pip install dlib
 
 ### 3. Environment Setup
 
+**Recommended: Use .env file (keeps secrets out of git)**
+
+1. Copy the example file:
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Edit `.env` and fill in your credentials:
+   ```bash
+   # Langfuse (Telemetry Tracking)
+   LANGFUSE_HOST=https://cloud.langfuse.com
+   LANGFUSE_PUBLIC_KEY=your-langfuse-public-key
+   LANGFUSE_SECRET_KEY=your-langfuse-secret-key
+   
+   # LanceDB (Vector Database)
+   LANCEDB_PROJECT_SLUG=your-project-slug
+   LANCEDB_API_KEY=your-lancedb-api-key
+   LANCEDB_REGION=us-east-1
+   
+   # OpenAI (for text-embedding-3-small model)
+   OPENAI_API_KEY=your-openai-api-key
+   ```
+
+3. The `.env` file is automatically loaded by `./run.sh` and `./run_amber.sh`
+
+**Alternative: Manual Environment Variables**
+
 **Langfuse (Telemetry Tracking):**
 
 **Easy way** - Use the provided setup script:
@@ -89,7 +116,10 @@ No setup needed! The system will automatically use a local database at `data/sce
 
 See `LANCEDB_INTEGRATION.md` for detailed setup instructions.
 
-**Note**: Langfuse credentials are provided for this project. For production use, get your own from https://cloud.langfuse.com and https://cloud.lancedb.com
+**Note**: 
+- The `.env` file is in `.gitignore` and will NOT be committed to git
+- `.env.example` is a template that IS committed (safe to share)
+- Get your own credentials from https://cloud.langfuse.com, https://cloud.lancedb.com, and https://platform.openai.com/api-keys
 
 ### 4. Reference Faces (Optional)
 
