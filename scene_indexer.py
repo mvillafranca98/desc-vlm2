@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 
 # Provide default LanceDB Cloud credentials if not explicitly set
 os.environ.setdefault("LANCEDB_PROJECT_SLUG", "descvlm2-lnh0lv")
-os.environ.setdefault("LANCEDB_API_KEY", "sk_SJLWUL2G2JDQFLZ5WKKM5DC4KJKIVAV73IECRDHTRSBUAEMY2DSQ====")
+# LANCEDB_API_KEY should be set in .env file or environment variables
+# No default key - must be provided by user
 os.environ.setdefault("LANCEDB_REGION", "us-east-1")
 
 # Try to import LanceDB

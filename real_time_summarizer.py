@@ -25,7 +25,8 @@ os.environ['NUMEXPR_NUM_THREADS'] = '1'
 
 # Provide default LanceDB Cloud credentials if not already set
 os.environ.setdefault('LANCEDB_PROJECT_SLUG', 'descvlm2-lnh0lv')
-os.environ.setdefault('LANCEDB_API_KEY', 'sk_SJLWUL2G2JDQFLZ5WKKM5DC4KJKIVAV73IECRDHTRSBUAEMY2DSQ====')
+# LANCEDB_API_KEY should be set in .env file or environment variables
+# No default key - must be provided by user
 os.environ.setdefault('LANCEDB_REGION', 'us-east-1')
 
 # Set OpenCV to use single thread to avoid segfaults on macOS

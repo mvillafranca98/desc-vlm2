@@ -9,7 +9,8 @@ from scene_indexer import SceneIndexer, get_table_name_for_model
 
 # Set up environment
 os.environ.setdefault('LANCEDB_PROJECT_SLUG', 'descvlm2-lnh0lv')
-os.environ.setdefault('LANCEDB_API_KEY', 'sk_SJLWUL2G2JDQFLZ5WKKM5DC4KJKIVAV73IECRDHTRSBUAEMY2DSQ====')
+# LANCEDB_API_KEY should be set in .env file or environment variables
+# No default key - must be provided by user
 os.environ.setdefault('LANCEDB_REGION', 'us-east-1')
 
 def check_table_status():

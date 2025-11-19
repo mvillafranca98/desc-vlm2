@@ -98,8 +98,8 @@ source setup_langfuse.sh
 **Manual way** - Export environment variables:
 ```bash
 export LANGFUSE_HOST="https://cloud.langfuse.com"
-export LANGFUSE_PUBLIC_KEY="pk-lf-61ba616e-de46-4d72-a848-753fd9a5b3fb"
-export LANGFUSE_SECRET_KEY="sk-lf-e8c7bb1b-554d-4396-95ad-95c30593d6c8"
+export LANGFUSE_PUBLIC_KEY="pk-lf-your-public-key-here"
+export LANGFUSE_SECRET_KEY="sk-lf-your-secret-key-here"
 ```
 
 **LanceDB (Semantic Search) - Optional:**
@@ -285,6 +285,204 @@ python search_scenes.py --list
 - Natural language query interface
 
 See `LANCEDB_INTEGRATION.md` for complete integration guide.
+
+## Usage Guide
+
+### 1. Captioning Frames and Indexing Scenes
+
+The main application captures video frames, generates captions, and indexes scenes for semantic search.
+
+**Basic Usage:**
+```bash
+# Run with interactive model selection menu
+./run.sh
+
+# Run with specific camera (default is 0)
+./run.sh --camera 1
+
+# Run with custom frame rate (default is 4 FPS)
+./run.sh --fps 2
+
+# Combine options
+./run.sh --camera 0 --fps 4
+```
+
+**What it does:**
+- Shows an interactive menu to select embedding model:
+  - Option 1: OpenAI text-embedding-3-small (1536 dimensions, recommended)
+  - Option 2: BAAI/bge-base-en (768 dimensions)
+  - Option 3: intfloat/e5-large-v2 (1024 dimensions)
+  - Option 4: sentence-transformers/all-MiniLM-L6-v2 (384 dimensions)
+- Captures video frames from your camera
+- Generates VLM captions for each frame
+- Creates LLM summaries of recent captions
+- Automatically indexes scenes to LanceDB for semantic search
+- Displays live video feed with captions and summaries
+
+**Requirements:**
+- `.env` file with API keys (Langfuse, LanceDB, OpenAI if using OpenAI model)
+- Camera access permissions
+
+**Output:**
+- Frames saved to `frames/` directory
+- Scenes indexed to LanceDB (model-specific tables)
+- Statistics printed on exit (VLM and LLM performance)
+
+---
+
+### 2. Amber Assistant - Interactive Scene Search
+
+Amber is a GUI assistant for natural language scene search with time-based filtering.
+
+**Basic Usage:**
+```bash
+# Launch Amber Assistant GUI
+./run_amber.sh
+```
+
+**Features:**
+- Natural language query interface
+- Time-based filtering (e.g., "yesterday", "past 2 hours", "last week")
+- Displays results with images, relevance scores, and timestamps
+- Shows up to 3 frame images per result
+- Processing time tracking
+
+**Example Queries:**
+- "Do you have any records of hyenas from yesterday?"
+- "Show me scenes with bicycles from the past 2 hours"
+- "Are there any records of lions last week?"
+- "Do you have any records on a man wearing glasses from two weeks ago?"
+
+**Configuration:**
+- Uses embedding model from `.env` file (defaults to `BAAI/bge-base-en`)
+- Automatically uses the correct LanceDB table based on model
+- Requires `.env` file with LanceDB and Langfuse credentials
+
+**Output:**
+- Interactive GUI window
+- Real-time search results with images
+- Detailed statistics (vector similarity, relevance scores, timestamps)
+
+---
+
+### 3. Semantic Query Testing
+
+Batch test semantic queries and generate HTML/PDF reports comparing different embedding models.
+
+**Basic Usage:**
+```bash
+# Test with default model (from .env or text-embedding-3-small)
+python test_semantic_queries.py
+
+# Test with specific embedding model
+python test_semantic_queries.py --embedding-model "BAAI/bge-base-en"
+python test_semantic_queries.py --embedding-model "text-embedding-3-small"
+python test_semantic_queries.py --embedding-model "intfloat/e5-large-v2"
+python test_semantic_queries.py --embedding-model "e5-large-v2"  # Short alias works too
+
+# Test with time filter
+python test_semantic_queries.py --time-filter "past 15 minutes"
+python test_semantic_queries.py --time-filter "past 30 minutes"
+python test_semantic_queries.py --time-filter "past 2 hours"
+python test_semantic_queries.py --time-filter "past 24 hours"
+python test_semantic_queries.py --time-filter "yesterday"
+python test_semantic_queries.py --time-filter "past 3 days"
+python test_semantic_queries.py --time-filter "last week"
+
+# Combine model and time filter
+python test_semantic_queries.py --embedding-model "BAAI/bge-base-en" --time-filter "past 24 hours"
+
+# Test all 4 models and generate comparison reports
+python test_semantic_queries.py --all-models
+
+# Test with specific table
+python test_semantic_queries.py --scene-table "scene_embeddings_bge"
+
+# Search all data (no time filter)
+python test_semantic_queries.py --time-filter ""
+```
+
+**Supported Time Filters:**
+- `"past X minutes"` - e.g., "past 15 minutes", "past 30 minutes"
+- `"past X hours"` - e.g., "past 2 hours", "past 0.25 hours" (15 min)
+- `"past X days"` - e.g., "past 3 days"
+- `"last X minutes/hours/days"` - same as "past"
+- `"yesterday"`, `"today"`, `"past week"`, `"last month"`
+
+**Supported Embedding Models:**
+- `BAAI/bge-base-en` (768 dimensions)
+- `intfloat/e5-large-v2` (1024 dimensions)
+- `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions)
+- `text-embedding-3-small` (1536 dimensions, requires OPENAI_API_KEY)
+
+**Output:**
+- HTML report in `reports/html/semantic_query_test_report_*.html`
+- Shows query results with images, scores, and statistics
+- Can be converted to PDF using `convert_report_to_pdf.py`
+
+**View Reports:**
+```bash
+# Serve HTML reports locally
+python serve_report.py
+# Opens http://localhost:8000
+
+# Or open directly
+open reports/html/semantic_query_test_report_*.html
+```
+
+---
+
+### 4. Model Comparison Report
+
+Generate comprehensive comparison reports including VLM/LLM statistics and semantic query results across all embedding models.
+
+**Basic Usage:**
+```bash
+# Generate comparison report
+python generate_model_comparison_report.py
+```
+
+**What it includes:**
+- Overall performance comparison table
+- VLM API statistics for each model (request counts, timing metrics)
+- LLM summarization statistics (processing times, success rates)
+- Semantic query results summary from HTML reports
+- Visual comparison with best/worst performers highlighted
+
+**Output:**
+- HTML report in `reports/html/model_comparison_report_*.html`
+- Can be converted to PDF using `convert_report_to_pdf.py`
+
+**Convert to PDF:**
+```bash
+# Convert latest HTML report to PDF
+python convert_report_to_pdf.py
+```
+
+**Note:** The comparison report uses hardcoded statistics from the script. To update with your own statistics, edit `generate_model_comparison_report.py` and update the `MODEL_STATS` dictionary with your VLM/LLM statistics and HTML report paths.
+
+---
+
+### Quick Workflow Example
+
+```bash
+# 1. Capture and index frames (with OpenAI model)
+./run.sh
+# Select option 1 for OpenAI text-embedding-3-small
+
+# 2. Test semantic queries on recent data
+python test_semantic_queries.py --embedding-model "text-embedding-3-small" --time-filter "past 2 hours"
+
+# 3. Use Amber Assistant for interactive search
+./run_amber.sh
+# Ask: "Do you have any records of people from the past hour?"
+
+# 4. Generate comparison report
+python generate_model_comparison_report.py
+
+# 5. View results
+python serve_report.py
+```
 
 ## Troubleshooting
 
